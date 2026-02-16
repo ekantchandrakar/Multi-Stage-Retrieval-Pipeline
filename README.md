@@ -5,6 +5,7 @@ A production-grade hybrid retrieval system combining lexical (BM25) and semantic
 ## 🎯 Project Overview
 
 This system implements a state-of-the-art hybrid search architecture that:
+
 - **Combines** lexical (BM25) and semantic (Bi-Encoder) retrieval strategies
 - **Fuses** rankings using Reciprocal Rank Fusion (RRF)
 - **Re-ranks** results using Cross-Encoder for precision optimization
@@ -81,6 +82,7 @@ hybrid_search_system/
 ## 🛠️ Installation
 
 ### Prerequisites
+
 - Python 3.8+
 - pip
 
@@ -151,6 +153,7 @@ print("Hybrid Results:", comparison['hybrid'][:3])
 **File**: `semantic_search_dataset_2000.csv`
 
 **Fields**:
+
 - `id`: Unique identifier
 - `category`: Topic category (e.g., Data Structures, Algorithms, Databases)
 - `difficulty`: Beginner, Intermediate, Advanced
@@ -159,6 +162,7 @@ print("Hybrid Results:", comparison['hybrid'][:3])
 - `tags`: Comma-separated tags
 
 **Statistics**:
+
 - Total documents: 2,000
 - Categories: 6 (Data Structures, Algorithms, Databases, DevOps & Cloud, Backend Systems, etc.)
 - Difficulty levels: 3 (Beginner, Intermediate, Advanced)
@@ -166,22 +170,26 @@ print("Hybrid Results:", comparison['hybrid'][:3])
 ## 🔬 Components
 
 ### 1. BM25 Retriever (Lexical Search)
+
 - **Algorithm**: BM25 (Best Matching 25)
 - **Strengths**: Exact term matching, keyword search
 - **Use Case**: Finding documents with specific technical terms
 
 ### 2. Semantic Retriever (Bi-Encoder)
+
 - **Model**: `all-MiniLM-L6-v2`
 - **Index**: FAISS (Facebook AI Similarity Search)
 - **Strengths**: Understanding semantic similarity, handling synonyms
 - **Use Case**: Conceptual searches, paraphrased queries
 
 ### 3. Reciprocal Rank Fusion (RRF)
+
 - **Formula**: `RRF(d) = Σ 1/(k + rank(d))` where k=60
 - **Purpose**: Merge rankings from multiple retrievers
 - **Benefit**: Combines strengths of both lexical and semantic approaches
 
 ### 4. Cross-Encoder Re-ranker
+
 - **Model**: `cross-encoder/ms-marco-MiniLM-L-6-v2`
 - **Purpose**: Fine-grained relevance scoring
 - **Benefit**: Highest precision for final top-k results
@@ -226,7 +234,7 @@ cross_encoder:
   device: "cpu"
 
 faiss:
-  index_type: "IndexFlatIP"  # Inner product for normalized vectors
+  index_type: "IndexFlatIP" # Inner product for normalized vectors
   normalize: true
 ```
 
@@ -254,11 +262,13 @@ cross_encoder:
 ## 📈 Performance Considerations
 
 ### Memory Usage
+
 - **BM25 Index**: ~50-100 MB for 2,000 documents
 - **FAISS Index**: ~3-5 MB (384-dim embeddings)
 - **Embeddings**: ~3 MB (2000 × 384 × 4 bytes)
 
 ### Speed Benchmarks (approximate)
+
 - **BM25 Search**: ~10-20 ms
 - **Semantic Search**: ~5-15 ms (FAISS)
 - **RRF Fusion**: ~1-2 ms
@@ -266,6 +276,7 @@ cross_encoder:
 - **Total Hybrid Search**: ~120-240 ms
 
 ### Scalability
+
 - Handles up to 100K documents efficiently
 - For larger datasets, consider:
   - Approximate nearest neighbor search (FAISS IVF)
@@ -304,15 +315,12 @@ class HybridSearchEngine:
 ## 🤝 Contributing
 
 Contributions are welcome! Please:
+
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
 4. Add tests
 5. Submit a pull request
-
-## 📄 License
-
-MIT License
 
 ## 🙏 Acknowledgments
 
