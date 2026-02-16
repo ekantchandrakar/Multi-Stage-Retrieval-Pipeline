@@ -1,0 +1,89 @@
+# Search Configuration for Hybrid Search System
+
+# BM25 Search Parameters
+bm25_search:
+  top_k: 50  # Number of results to retrieve
+  min_score: 0.0  # Minimum score threshold
+  
+# Semantic Search Parameters
+semantic_search:
+  top_k: 50  # Number of results to retrieve
+  similarity_metric: "cosine"  # Options: "cosine", "dot_product", "euclidean"
+  min_similarity: 0.0  # Minimum similarity threshold
+
+# Reciprocal Rank Fusion (RRF) Parameters
+rrf_fusion:
+  k: 60  # Constant for RRF formula (standard value)
+  top_k: 50  # Number of fused candidates
+  
+  # Weighting strategy (optional)
+  use_weights: false
+  bm25_weight: 0.5
+  semantic_weight: 0.5
+
+# Cross-Encoder Re-ranking Parameters
+cross_encoder_rerank:
+  top_k: 5  # Final number of results to return
+  batch_size: 16
+  min_score: null  # Optional score threshold
+
+# Query Processing
+query_processing:
+  lowercase: true
+  strip_whitespace: true
+  remove_special_chars: false
+  max_query_length: 512
+
+# Search Modes
+search_modes:
+  default: "hybrid"  # Options: "bm25", "semantic", "hybrid"
+  
+  # Mode-specific settings
+  bm25_only:
+    top_k: 5
+    
+  semantic_only:
+    top_k: 5
+    
+  hybrid:
+    retrieve_k: 50  # Candidates from each retriever
+    rerank_k: 5     # Final results after re-ranking
+
+# Caching
+caching:
+  enable_query_cache: true
+  cache_size: 1000  # Number of queries to cache
+  cache_ttl: 3600   # Time to live in seconds
+
+# Performance
+performance:
+  enable_parallel_search: false
+  num_threads: 4
+  
+# Logging and Debugging
+logging:
+  log_queries: true
+  log_results: false
+  log_level: "INFO"  # Options: "DEBUG", "INFO", "WARNING", "ERROR"
+  
+# Evaluation
+evaluation:
+  # Test queries for evaluation
+  test_queries:
+    - "reverse singly linked list"
+    - "optimize SQL join performance"
+    - "deploy microservice on kubernetes"
+    - "reduce API latency in production"
+    - "implement binary search tree"
+    - "explain ACID properties in databases"
+    - "design scalable REST API"
+    - "kubernetes pod autoscaling"
+    - "database indexing strategies"
+    - "implement heap data structure"
+  
+  # Metrics to compute
+  compute_metrics:
+    - "precision"
+    - "recall"
+    - "ndcg"
+    - "mrr"

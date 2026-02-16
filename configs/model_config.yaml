@@ -1,0 +1,56 @@
+# Model Configuration for Hybrid Search System
+
+# Bi-Encoder Configuration (Semantic Retrieval)
+bi_encoder:
+  model_name: "sentence-transformers/all-MiniLM-L6-v2"
+  device: "cpu"  # Options: "cpu", "cuda"
+  batch_size: 32
+  max_seq_length: 256
+  normalize_embeddings: true
+  
+  # Model parameters
+  embedding_dim: 384
+  pooling_mode: "mean"
+
+# Cross-Encoder Configuration (Re-ranking)
+cross_encoder:
+  model_name: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  device: "cpu"  # Options: "cpu", "cuda"
+  batch_size: 16
+  max_seq_length: 512
+  
+  # Inference parameters
+  show_progress_bar: false
+  convert_to_tensor: false
+
+# FAISS Index Configuration
+faiss:
+  index_type: "IndexFlatIP"  # Inner Product for cosine similarity
+  # Alternative: "IndexIVFFlat" for approximate search on large datasets
+  normalize_vectors: true
+  
+  # For IVF index (if using approximate search)
+  nlist: 100  # Number of clusters
+  nprobe: 10  # Number of clusters to search
+
+# BM25 Configuration
+bm25:
+  # BM25 parameters
+  k1: 1.5  # Term frequency saturation parameter
+  b: 0.75  # Length normalization parameter
+  epsilon: 0.25  # Floor value for IDF
+  
+  # Tokenization
+  lowercase: true
+  remove_stopwords: false
+  stemming: false
+
+# General Model Settings
+general:
+  random_seed: 42
+  verbose: true
+  cache_dir: "./models/cache/"
+  
+  # Performance
+  use_multiprocessing: false
+  num_workers: 4
