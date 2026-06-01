@@ -1,151 +1,191 @@
 """
-Main demo script for Hybrid Search System
-Demonstrates building indices and performing searches
+main.py – Hybrid Search System Demo
+=====================================
+Demonstrates:
+  1. StaQC dataset loading (replaces old CSV)
+  2. IVF-FAISS auto-selection based on corpus size
+  3. Full IR evaluation: NDCG@10, MRR, Recall@10
 """
+
 import sys
+import logging
 from pathlib import Path
 
-# Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.search_engine import HybridSearchEngine
+from src.evaluation import EvaluationSuite, GroundTruthBuilder
 from src.utils import setup_logger, format_search_results, save_json
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = setup_logger(__name__)
 
 
-def main():
-    """Main execution function."""
-    
-    print("\n" + "="*80)
-    print("HYBRID SEMANTIC SEARCH SYSTEM - DEMO")
-    print("="*80 + "\n")
-    
-    # Configuration
-    DATA_PATH = "data/semantic_search_dataset_2000.csv"
-    MODEL_DIR = "models"
-    OUTPUT_DIR = "outputs"
-    
-    # Test queries
-    TEST_QUERIES = [
-        "reverse singly linked list",
-        "optimize SQL join performance",
-        "deploy microservice on kubernetes",
-        "reduce API latency in production",
-        "implement binary search tree",
-        "explain ACID properties in databases",
-        "design scalable REST API",
-        "kubernetes pod autoscaling",
-        "database indexing strategies",
-        "implement heap data structure"
-    ]
-    
-    # Initialize search engine
-    print("🚀 Initializing Hybrid Search Engine...\n")
-    engine = HybridSearchEngine(
-        data_path=DATA_PATH,
-        model_dir=MODEL_DIR,
-        device="cpu"
-    )
-    
-    # Build indices
-    print("\n📊 Building search indices...")
-    print("This may take a few minutes on first run...\n")
-    engine.build_indices()
-    
-    # Perform single search demonstration
-    print("\n" + "="*80)
-    print("SINGLE SEARCH DEMONSTRATION")
-    print("="*80 + "\n")
-    
-    demo_query = "reverse singly linked list"
-    print(f"Query: '{demo_query}'\n")
-    
-    print("Comparing all three retrieval methods:\n")
-    comparison = engine.compare_retrievers(demo_query, top_k=5)
-    
-    print("\n--- BM25 Results (Lexical) ---")
-    print(format_search_results(comparison['bm25']))
-    
-    print("\n--- Semantic Results (Bi-Encoder) ---")
-    print(format_search_results(comparison['semantic']))
-    
-    print("\n--- Hybrid Results (RRF + Cross-Encoder) ---")
-    print(format_search_results(comparison['hybrid']))
-    
-    print("\n--- Overlap Analysis ---")
-    overlap = comparison['overlap_analysis']
-    print(f"BM25 ∩ Semantic: {overlap['bm25_semantic_overlap']} documents")
-    print(f"BM25 ∩ Hybrid: {overlap['bm25_hybrid_overlap']} documents")
-    print(f"Semantic ∩ Hybrid: {overlap['semantic_hybrid_overlap']} documents")
-    print(f"All Three: {overlap['all_three_overlap']} documents")
-    
-    # Batch evaluation
-    print("\n" + "="*80)
-    print("BATCH EVALUATION ON TEST QUERIES")
-    print("="*80 + "\n")
-    
-    print(f"Evaluating on {len(TEST_QUERIES)} test queries...\n")
-    
+# ---------------------------------------------------------------------------
+# Configuration  ← edit these as needed
+# ---------------------------------------------------------------------------
+
+DATA_LANGUAGE = "mca_python"        
+MAX_RECORDS   = 4000        
+MODEL_DIR     = "models"
+OUTPUT_DIR    = "outputs"
+DEVICE        = "cpu"
+
+# Test queries (StaQC / StackOverflow flavour)
+TEST_QUERIES = [
+    # Python queries
+    "reverse a linked list in Python",
+    "implement binary search tree in Python",
+    "Adding a simple value to a string",
+    "how to use list comprehension in Python",
+    "How can I sort a 2D list?"
+    "In Python, can I call the variable from main function - use global variable?"
+]
+
+EVAL_K = 10   # NDCG@10, Recall@10, etc.
+
+
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    print("\n" + "=" * 70)
+    print("  HYBRID SEMANTIC SEARCH SYSTEM  –  Production Demo")
+    print("=" * 70 + "\n")
+
     Path(OUTPUT_DIR).mkdir(exist_ok=True)
-    results = engine.evaluate_on_queries(
-        TEST_QUERIES,
-        save_path=f"{OUTPUT_DIR}/evaluation_results.json"
+
+    # ------------------------------------------------------------------ #
+    #  1.  Initialise engine (StaQC, IVF-FAISS auto-selected)             #
+    # ------------------------------------------------------------------ #
+    print(f"🔧  Initialising engine  (language={DATA_LANGUAGE}, max_records={MAX_RECORDS:,})")
+    engine = HybridSearchEngine(
+        data_path="staqc",          # triggers HuggingFace StaQC download
+        model_dir=MODEL_DIR,
+        language=DATA_LANGUAGE,  # "man_python" | "man_sql" | "mca_python"
+        max_records=MAX_RECORDS,
+        device=DEVICE,
+        # index_type=None → auto: Flat if N<10K, IVFFlat if N<500K, IVFPQ otherwise
     )
-    
-    print(f"\n✅ Evaluation complete!")
-    print(f"Average search time: {results['statistics']['avg_search_time']:.3f}s")
-    print(f"Results saved to: {OUTPUT_DIR}/evaluation_results.json")
-    
-    # Display sample results for a few queries
-    print("\n" + "="*80)
-    print("SAMPLE RESULTS")
-    print("="*80)
-    
-    for i, query_result in enumerate(results['queries'][:3], 1):
-        query = query_result['query']
-        hybrid_results = query_result['results']['hybrid']
-        
-        print(f"\n{i}. Query: '{query}'")
-        print(f"   Search time: {query_result['search_time']:.3f}s")
-        print(f"   Top result: {hybrid_results[0]['title']}")
-        print(f"   Score: {hybrid_results[0]['score']:.4f}")
-    
-    # System statistics
-    print("\n" + "="*80)
-    print("SYSTEM STATISTICS")
-    print("="*80 + "\n")
-    
-    system_info = engine.get_system_info()
-    
-    print(f"Total Documents: {system_info['data']['total_documents']}")
-    print(f"Categories: {list(system_info['data']['categories'].keys())}")
-    print(f"BM25 Vocabulary: {system_info['bm25']['vocabulary_size']} terms")
-    print(f"Semantic Embedding Dim: {system_info['semantic']['embedding_dim']}")
-    print(f"FAISS Index Vectors: {system_info['semantic']['total_vectors']}")
-    
-    print("\n" + "="*80)
-    print("DEMO COMPLETE")
-    print("="*80 + "\n")
-    
-    print("Next steps:")
-    print("1. Check outputs/evaluation_results.json for detailed results")
-    print("2. Explore the Jupyter notebooks in notebooks/ directory")
-    print("3. Try your own queries using the search engine")
-    print("\nExample usage:")
-    print(">>> from src.search_engine import HybridSearchEngine")
-    print(">>> engine = HybridSearchEngine('data/semantic_search_dataset_2000.csv')")
-    print(">>> engine.load_indices()  # Load pre-built indices")
-    print(">>> results = engine.search('your query here', top_k=5)")
+
+    print("\n📦  Building / loading indices …\n")
+    engine.build_indices()
+
+    # Print FAISS index type chosen
+    sinfo = engine.get_system_info()
+    faiss_type = sinfo["semantic"].get("index_type", "?")
+    print(f"\n✅  Index ready")
+    print(f"   Documents : {sinfo['data'].get('total_documents', '?'):,}")
+    print(f"   BM25 vocab: {sinfo['bm25'].get('vocabulary_size', '?'):,}")
+    print(f"   FAISS type: {faiss_type}")
+    if "nlist" in sinfo["semantic"]:
+        print(f"   nlist={sinfo['semantic']['nlist']}, nprobe={sinfo['semantic']['nprobe']}")
+
+    # ------------------------------------------------------------------ #
+    #  2.  Single-query retriever comparison                               #
+    # ------------------------------------------------------------------ #
+    print("\n" + "=" * 70)
+    print("  SINGLE-QUERY RETRIEVER COMPARISON")
+    print("=" * 70)
+
+    demo_q = TEST_QUERIES[0]
+    print(f"\nQuery: '{demo_q}'\n")
+    comp = engine.compare_retrievers(demo_q, top_k=5)
+
+    for method in ("bm25", "semantic", "hybrid"):
+        print(f"\n── {method.upper()} ──")
+        for r in comp[method]:
+            print(f"  [{r['rank']}] {r['title'][:80]}  (score={r['score']:.4f})")
+
+    ov = comp["overlap_analysis"]
+    print(
+        f"\nOverlap  BM25∩Sem={ov['bm25_semantic_overlap']}  "
+        f"BM25∩Hyb={ov['bm25_hybrid_overlap']}  "
+        f"Sem∩Hyb={ov['semantic_hybrid_overlap']}  "
+        f"All3={ov['all_three_overlap']}"
+    )
+
+    # ------------------------------------------------------------------ #
+    #  3.  IR Evaluation: NDCG@10, MRR, Recall@10                         #
+    # ------------------------------------------------------------------ #
+    print("\n" + "=" * 70)
+    print("  IR EVALUATION  (NDCG@10 · MRR · Recall@10)")
+    print("=" * 70)
+
+    # Build pseudo-relevance ground truth using keyword matching
+    print("\n🔍  Building pseudo-relevance ground truth …")
+    gtb = GroundTruthBuilder(engine.metadata)
+    ground_truth = gtb.build_from_keywords(
+        TEST_QUERIES,
+        min_relevance=2,      # doc must contain ≥2 query tokens
+    )
+
+    n_relevant = {q: len(v) for q, v in ground_truth.items()}
+    print(f"   Avg relevant docs per query: "
+          f"{sum(n_relevant.values()) / len(n_relevant):.1f}")
+
+    # Run evaluation
+    suite = EvaluationSuite(engine, k=EVAL_K)
+    report = suite.run(
+        queries=TEST_QUERIES,
+        ground_truth=ground_truth,
+        search_types=["bm25", "semantic", "hybrid"],
+        top_k=EVAL_K,
+    )
+
+    # Pretty-print
+    suite.print_report(report)
+
+    # Comparison table
+    cmp_table = suite.compare_search_types(report)
+    print("\n  Comparison table:")
+    print(f"  {'Method':<12}", end="")
+    first_row = cmp_table["comparison_table"][0] if cmp_table["comparison_table"] else {}
+    headers = [k for k in first_row if k != "search_type"]
+    for h in headers:
+        print(f"  {h:<18}", end="")
     print()
+    print("  " + "-" * (12 + 18 * len(headers)))
+    for row in cmp_table["comparison_table"]:
+        print(f"  {row['search_type']:<12}", end="")
+        for h in headers:
+            print(f"  {str(row.get(h,'')):<18}", end="")
+        print()
+
+    # Save full report
+    report_path = f"{OUTPUT_DIR}/evaluation_report.json"
+    suite.save_report(report, report_path)
+    print(f"\n💾  Full report saved → {report_path}")
+
+    # ------------------------------------------------------------------ #
+    #  4.  Batch evaluation (legacy helper)                                #
+    # ------------------------------------------------------------------ #
+    print("\n" + "=" * 70)
+    print("  BATCH EVALUATION (all 3 search types, first 5 queries)")
+    print("=" * 70 + "\n")
+
+    batch = engine.evaluate_on_queries(
+        TEST_QUERIES[:5],
+        save_path=f"{OUTPUT_DIR}/batch_results.json",
+    )
+    print(f"   Avg search time: {batch['statistics']['avg_search_time']:.3f}s")
+
+    # ------------------------------------------------------------------ #
+    #  5.  Summary                                                         #
+    # ------------------------------------------------------------------ #
+    print("\n" + "=" * 70)
+    print("  DONE")
+    print("=" * 70)
+    print(f"\n  Outputs written to ./{OUTPUT_DIR}/")
+    print("  evaluation_report.json  – per-query + aggregate IR metrics")
+    print("  batch_results.json      – full result sets for 5 queries\n")
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\nInterrupted by user.")
+        print("\nInterrupted.")
         sys.exit(0)
-    except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
+    except Exception:
+        logger.exception("Fatal error")
         sys.exit(1)

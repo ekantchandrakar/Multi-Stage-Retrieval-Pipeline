@@ -1,370 +1,371 @@
 """
-Semantic Retriever using Bi-Encoder and FAISS
-Implements dense vector search for semantic similarity
+Semantic Retriever with Adaptive FAISS Indexing
+------------------------------------------------
+Supports both exact (IndexFlatIP) and approximate (IndexIVFFlat / IndexIVFPQ)
+FAISS indices.  The index type is chosen automatically based on corpus size:
+
+  corpus < IVF_THRESHOLD   → IndexFlatIP  (exact, fast for small sets)
+  corpus >= IVF_THRESHOLD  → IndexIVFFlat (approximate, scalable to 100 K+)
+
+For very large corpora (> 500 K) IndexIVFPQ is recommended and can be
+enabled explicitly via index_type='ivfpq'.
+
+References
+----------
+- FAISS wiki: https://github.com/facebookresearch/faiss/wiki
+- IVF tuning:  nlist ≈ sqrt(N),  nprobe = max(1, nlist // 10)
 """
+
+import logging
 import pickle
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict, Any
-import numpy as np
+from typing import Any, Dict, List, Optional, Tuple
 
-from sentence_transformers import SentenceTransformer
 import faiss
+import numpy as np
+from sentence_transformers import SentenceTransformer
 
-from .utils import setup_logger, timing_decorator, batch_iterator
+from .utils import setup_logger, timing_decorator
 
 logger = setup_logger(__name__)
+
+# Corpus-size threshold for switching from flat → IVF index
+IVF_THRESHOLD = 10_000
+
+# IVF hyper-parameters
+_IVF_NLIST_FACTOR = 8          # nlist = max(64, N // factor)
+_IVF_NPROBE_FRACTION = 0.05    # nprobe = max(1, nlist * fraction)
+_IVFPQ_M = 64                  # number of sub-quantisers (must divide dim)
+_IVFPQ_NBITS = 8               # bits per sub-quantiser
 
 
 class SemanticRetriever:
     """
-    Semantic retriever using dense embeddings and FAISS for efficient similarity search.
-    
-    Uses a Bi-Encoder model to create document embeddings and FAISS for
-    fast approximate nearest neighbor search.
+    Dense-vector retriever with adaptive FAISS index selection.
+
+    Parameters
+    ----------
+    model_name : str
+        A sentence-transformers model identifier.
+    device : str
+        'cpu' or 'cuda'.
+    normalize_embeddings : bool
+        Normalise to unit length (cosine similarity via inner product).
+    index_type : str | None
+        'flat'   – always use IndexFlatIP  (exact)
+        'ivf'    – always use IndexIVFFlat (approximate)
+        'ivfpq'  – always use IndexIVFPQ   (compressed, very large corpora)
+        None     – auto-select based on corpus size  (default)
+    nlist : int | None
+        IVF number of Voronoi cells.  None = auto (≈ sqrt(N)).
+    nprobe : int | None
+        IVF cells visited per query.  None = auto (≈ nlist * 0.05).
     """
-    
-    def __init__(self, 
-                 model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
-                 device: str = "cpu",
-                 normalize_embeddings: bool = True):
-        """
-        Initialize Semantic Retriever.
-        
-        Args:
-            model_name: Name of the sentence-transformers model
-            device: Device to use ('cpu' or 'cuda')
-            normalize_embeddings: Whether to normalize embeddings (for cosine similarity)
-        """
+
+    def __init__(
+        self,
+        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        device: str = "cpu",
+        normalize_embeddings: bool = True,
+        index_type: Optional[str] = None,   # None = auto
+        nlist: Optional[int] = None,
+        nprobe: Optional[int] = None,
+    ):
         self.model_name = model_name
         self.device = device
         self.normalize_embeddings = normalize_embeddings
-        
-        # Load model
-        logger.info(f"Loading model: {model_name}")
+        self._requested_index_type = index_type
+        self._nlist_override = nlist
+        self._nprobe_override = nprobe
+
+        logger.info(f"Loading bi-encoder: {model_name}")
         self.model = SentenceTransformer(model_name, device=device)
-        
-        # Get embedding dimension
-        self.embedding_dim = self.model.get_sentence_embedding_dimension()
-        logger.info(f"Embedding dimension: {self.embedding_dim}")
-        
-        # FAISS index
-        self.index = None
-        self.embeddings = None
-        self.corpus_size = 0
-        
-        logger.info(f"Initialized SemanticRetriever with model {model_name}")
-    
+        self.embedding_dim: int = self.model.get_sentence_embedding_dimension()
+        logger.info(f"Embedding dim: {self.embedding_dim}")
+
+        # Set at build / load time
+        self.index: Optional[faiss.Index] = None
+        self.embeddings: Optional[np.ndarray] = None
+        self.corpus_size: int = 0
+        self._actual_index_type: str = "unknown"
+        self._nlist: int = 0
+        self._nprobe: int = 0
+
+    # ------------------------------------------------------------------
+    # Index building
+    # ------------------------------------------------------------------
+
     @timing_decorator
-    def build_index(self, 
-                   corpus: List[str], 
-                   batch_size: int = 32,
-                   show_progress: bool = True) -> None:
+    def build_index(
+        self,
+        corpus: List[str],
+        batch_size: int = 128,
+        show_progress: bool = True,
+    ) -> None:
         """
-        Build FAISS index from corpus.
-        
-        Args:
-            corpus: List of document texts
-            batch_size: Batch size for encoding
-            show_progress: Whether to show progress bar
+        Encode *corpus* and build a FAISS index.
+
+        For IVF indices the index is first trained on a sample of the
+        corpus, then all embeddings are added.
         """
-        logger.info(f"Building semantic index for {len(corpus)} documents")
-        
         self.corpus_size = len(corpus)
-        
-        # Encode corpus
-        logger.info("Encoding corpus...")
+        logger.info(f"Encoding {self.corpus_size:,} documents …")
+
         self.embeddings = self.model.encode(
             corpus,
             batch_size=batch_size,
             show_progress_bar=show_progress,
             convert_to_numpy=True,
-            normalize_embeddings=self.normalize_embeddings
+            normalize_embeddings=self.normalize_embeddings,
+        ).astype(np.float32)
+
+        logger.info(f"Embeddings shape: {self.embeddings.shape}")
+
+        self.index = self._build_faiss_index(self.embeddings)
+        logger.info(
+            f"FAISS index ready: type={self._actual_index_type}, "
+            f"vectors={self.index.ntotal:,}, "
+            f"nlist={self._nlist}, nprobe={self._nprobe}"
         )
-        
-        logger.info(f"Encoded {len(self.embeddings)} documents to {self.embeddings.shape[1]}-dim vectors")
-        
-        # Create FAISS index
-        logger.info("Creating FAISS index...")
-        
-        if self.normalize_embeddings:
-            # Use Inner Product for normalized vectors (equivalent to cosine similarity)
-            self.index = faiss.IndexFlatIP(self.embedding_dim)
-        else:
-            # Use L2 distance
-            self.index = faiss.IndexFlatL2(self.embedding_dim)
-        
-        # Add embeddings to index
-        self.index.add(self.embeddings.astype(np.float32))
-        
-        logger.info(f"FAISS index built with {self.index.ntotal} vectors")
-    
+
+    def _build_faiss_index(self, vecs: np.ndarray) -> faiss.Index:
+        """Select, train, and populate the appropriate FAISS index."""
+        n, d = vecs.shape
+        chosen = self._choose_index_type(n)
+        self._actual_index_type = chosen
+
+        if chosen == "flat":
+            index = faiss.IndexFlatIP(d)
+            index.add(vecs)
+            return index
+
+        if chosen == "ivf":
+            nlist = self._calc_nlist(n)
+            nprobe = self._calc_nprobe(nlist)
+            self._nlist = nlist
+            self._nprobe = nprobe
+
+            quantiser = faiss.IndexFlatIP(d)
+            index = faiss.IndexIVFFlat(quantiser, d, nlist, faiss.METRIC_INNER_PRODUCT)
+
+            logger.info(f"Training IVFFlat (nlist={nlist}) on {n:,} vectors …")
+            index.train(vecs)
+            index.add(vecs)
+            index.nprobe = nprobe
+            return index
+
+        if chosen == "ivfpq":
+            nlist = self._calc_nlist(n)
+            nprobe = self._calc_nprobe(nlist)
+            self._nlist = nlist
+            self._nprobe = nprobe
+
+            m = self._calc_pq_m(d)
+            quantiser = faiss.IndexFlatIP(d)
+            index = faiss.IndexIVFPQ(quantiser, d, nlist, m, _IVFPQ_NBITS)
+            index.metric_type = faiss.METRIC_INNER_PRODUCT
+
+            logger.info(f"Training IVFPQ (nlist={nlist}, m={m}) on {n:,} vectors …")
+            index.train(vecs)
+            index.add(vecs)
+            index.nprobe = nprobe
+            return index
+
+        raise ValueError(f"Unknown index type: {chosen}")
+
+    # ------------------------------------------------------------------
+    # Index type & hyper-parameter selection
+    # ------------------------------------------------------------------
+
+    def _choose_index_type(self, n: int) -> str:
+        if self._requested_index_type:
+            return self._requested_index_type
+        if n < IVF_THRESHOLD:
+            return "flat"
+        if n < 500_000:
+            return "ivf"
+        return "ivfpq"
+
+    def _calc_nlist(self, n: int) -> int:
+        if self._nlist_override:
+            return self._nlist_override
+        # Rule of thumb: nlist ≈ sqrt(N), bounded to [64, 65536]
+        raw = max(64, int(np.sqrt(n)))
+        # FAISS requires n_training_points ≥ nlist * 39 (k-means convergence)
+        # so cap nlist to n // 39
+        return min(raw, max(1, n // 39))
+
+    def _calc_nprobe(self, nlist: int) -> int:
+        if self._nprobe_override:
+            return self._nprobe_override
+        return max(1, int(nlist * _IVF_NPROBE_FRACTION))
+
+    @staticmethod
+    def _calc_pq_m(d: int) -> int:
+        """Largest divisor of d that is ≤ _IVFPQ_M."""
+        for m in range(_IVFPQ_M, 0, -1):
+            if d % m == 0:
+                return m
+        return 1  # fallback
+
+    # ------------------------------------------------------------------
+    # Search
+    # ------------------------------------------------------------------
+
     @timing_decorator
-    def search(self, 
-              query: str, 
-              top_k: int = 50) -> List[Tuple[int, float]]:
-        """
-        Search using semantic similarity.
-        
-        Args:
-            query: Search query
-            top_k: Number of results to return
-            
-        Returns:
-            List of (document_index, similarity_score) tuples sorted by score
-        """
+    def search(self, query: str, top_k: int = 50) -> List[Tuple[int, float]]:
+        """Return top_k (doc_index, score) pairs for *query*."""
         if self.index is None:
-            raise ValueError("Index not built. Call build_index() first.")
-        
-        # Encode query
-        query_embedding = self.model.encode(
+            raise RuntimeError("Index not built. Call build_index() first.")
+
+        q_emb = self.model.encode(
             [query],
             convert_to_numpy=True,
-            normalize_embeddings=self.normalize_embeddings
-        )
-        
-        # Search
-        scores, indices = self.index.search(
-            query_embedding.astype(np.float32),
-            min(top_k, self.corpus_size)
-        )
-        
-        # Convert to list of tuples
-        results = [
-            (int(idx), float(score)) 
-            for idx, score in zip(indices[0], scores[0])
-        ]
-        
-        logger.debug(f"Semantic search returned {len(results)} results for query: '{query}'")
-        
-        return results
-    
-    def batch_search(self, 
-                    queries: List[str], 
-                    top_k: int = 50,
-                    batch_size: int = 32) -> List[List[Tuple[int, float]]]:
-        """
-        Perform batch search for multiple queries.
-        
-        Args:
-            queries: List of search queries
-            top_k: Number of results per query
-            batch_size: Batch size for encoding queries
-            
-        Returns:
-            List of search results for each query
-        """
-        logger.info(f"Performing batch semantic search for {len(queries)} queries")
-        
+            normalize_embeddings=self.normalize_embeddings,
+        ).astype(np.float32)
+
+        k = min(top_k, self.corpus_size)
+        scores, indices = self.index.search(q_emb, k)
+
+        return [(int(idx), float(sc)) for idx, sc in zip(indices[0], scores[0]) if idx >= 0]
+
+    def batch_search(
+        self,
+        queries: List[str],
+        top_k: int = 50,
+        batch_size: int = 64,
+    ) -> List[List[Tuple[int, float]]]:
+        """Batch search – much faster than calling search() in a loop."""
         if self.index is None:
-            raise ValueError("Index not built. Call build_index() first.")
-        
-        # Encode all queries
-        query_embeddings = self.model.encode(
-            queries,
-            batch_size=batch_size,
-            convert_to_numpy=True,
-            normalize_embeddings=self.normalize_embeddings
+            raise RuntimeError("Index not built.")
+
+        all_results: List[List[Tuple[int, float]]] = []
+        k = min(top_k, self.corpus_size)
+
+        for start in range(0, len(queries), batch_size):
+            batch = queries[start : start + batch_size]
+            q_embs = self.model.encode(
+                batch,
+                convert_to_numpy=True,
+                normalize_embeddings=self.normalize_embeddings,
+            ).astype(np.float32)
+
+            scores, indices = self.index.search(q_embs, k)
+            for row_scores, row_idxs in zip(scores, indices):
+                all_results.append(
+                    [(int(i), float(s)) for i, s in zip(row_idxs, row_scores) if i >= 0]
+                )
+
+        return all_results
+
+    # ------------------------------------------------------------------
+    # Tune nprobe at runtime (trade accuracy for speed)
+    # ------------------------------------------------------------------
+
+    def set_nprobe(self, nprobe: int) -> None:
+        """Adjust nprobe for IVF / IVFPQ indices after building."""
+        if self.index is not None and hasattr(self.index, "nprobe"):
+            self.index.nprobe = nprobe
+            self._nprobe = nprobe
+            logger.info(f"nprobe updated → {nprobe}")
+        else:
+            logger.warning("set_nprobe() has no effect on a flat index.")
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def save(self, save_dir: str) -> None:
+        if self.index is None or self.embeddings is None:
+            raise RuntimeError("Nothing to save.")
+        p = Path(save_dir)
+        p.mkdir(parents=True, exist_ok=True)
+
+        faiss.write_index(self.index, str(p / "faiss_index.bin"))
+        np.save(p / "embeddings.npy", self.embeddings)
+
+        meta = {
+            "model_name": self.model_name,
+            "device": self.device,
+            "normalize_embeddings": self.normalize_embeddings,
+            "embedding_dim": self.embedding_dim,
+            "corpus_size": self.corpus_size,
+            "actual_index_type": self._actual_index_type,
+            "nlist": self._nlist,
+            "nprobe": self._nprobe,
+        }
+        with open(p / "semantic_metadata.pkl", "wb") as f:
+            pickle.dump(meta, f)
+
+        logger.info(f"SemanticRetriever saved to {save_dir}")
+
+    def load(self, save_dir: str) -> None:
+        p = Path(save_dir)
+        if not p.exists():
+            raise FileNotFoundError(f"Directory not found: {save_dir}")
+
+        with open(p / "semantic_metadata.pkl", "rb") as f:
+            meta = pickle.load(f)
+
+        self.index = faiss.read_index(str(p / "faiss_index.bin"))
+        self.embeddings = np.load(p / "embeddings.npy")
+        self.embedding_dim = meta["embedding_dim"]
+        self.corpus_size = meta["corpus_size"]
+        self.normalize_embeddings = meta["normalize_embeddings"]
+        self._actual_index_type = meta.get("actual_index_type", "unknown")
+        self._nlist = meta.get("nlist", 0)
+        self._nprobe = meta.get("nprobe", 0)
+
+        # Restore nprobe on loaded IVF index
+        if hasattr(self.index, "nprobe") and self._nprobe > 0:
+            self.index.nprobe = self._nprobe
+
+        logger.info(
+            f"SemanticRetriever loaded: {self.corpus_size:,} vectors, "
+            f"type={self._actual_index_type}"
         )
-        
-        # Search
-        scores, indices = self.index.search(
-            query_embeddings.astype(np.float32),
-            min(top_k, self.corpus_size)
-        )
-        
-        # Convert to list of results
-        results = []
-        for query_indices, query_scores in zip(indices, scores):
-            query_results = [
-                (int(idx), float(score)) 
-                for idx, score in zip(query_indices, query_scores)
-            ]
-            results.append(query_results)
-        
-        return results
-    
+
+    # ------------------------------------------------------------------
+    # Stats / repr
+    # ------------------------------------------------------------------
+
+    def get_statistics(self) -> Dict[str, Any]:
+        if self.index is None:
+            return {"status": "not_built"}
+        s: Dict[str, Any] = {
+            "status": "built",
+            "model_name": self.model_name,
+            "embedding_dim": self.embedding_dim,
+            "corpus_size": self.corpus_size,
+            "index_type": self._actual_index_type,
+            "total_vectors": self.index.ntotal,
+            "device": self.device,
+            "normalize_embeddings": self.normalize_embeddings,
+        }
+        if self._nlist:
+            s["nlist"] = self._nlist
+            s["nprobe"] = self._nprobe
+        if self.embeddings is not None:
+            s["embedding_memory_mb"] = round(self.embeddings.nbytes / 1024 / 1024, 2)
+        return s
+
+    def compute_similarity(self, text1: str, text2: str) -> float:
+        e1 = self.model.encode([text1], normalize_embeddings=self.normalize_embeddings)[0]
+        e2 = self.model.encode([text2], normalize_embeddings=self.normalize_embeddings)[0]
+        return float(np.dot(e1, e2))
+
     def get_embedding(self, text: str) -> np.ndarray:
-        """
-        Get embedding for a single text.
-        
-        Args:
-            text: Input text
-            
-        Returns:
-            Embedding vector
-        """
-        embedding = self.model.encode(
+        return self.model.encode(
             [text],
             convert_to_numpy=True,
-            normalize_embeddings=self.normalize_embeddings
-        )
-        return embedding[0]
-    
-    def compute_similarity(self, text1: str, text2: str) -> float:
-        """
-        Compute similarity between two texts.
-        
-        Args:
-            text1: First text
-            text2: Second text
-            
-        Returns:
-            Similarity score
-        """
-        emb1 = self.get_embedding(text1)
-        emb2 = self.get_embedding(text2)
-        
-        if self.normalize_embeddings:
-            # Cosine similarity (dot product of normalized vectors)
-            similarity = np.dot(emb1, emb2)
-        else:
-            # L2 distance converted to similarity
-            distance = np.linalg.norm(emb1 - emb2)
-            similarity = 1.0 / (1.0 + distance)
-        
-        return float(similarity)
-    
-    def get_nearest_neighbors(self, 
-                             doc_index: int, 
-                             top_k: int = 5) -> List[Tuple[int, float]]:
-        """
-        Find nearest neighbors for a document.
-        
-        Args:
-            doc_index: Index of the document
-            top_k: Number of neighbors to return
-            
-        Returns:
-            List of (neighbor_index, similarity_score) tuples
-        """
-        if self.index is None or self.embeddings is None:
-            raise ValueError("Index not built.")
-        
-        if not (0 <= doc_index < self.corpus_size):
-            raise ValueError(f"Document index {doc_index} out of range")
-        
-        # Get embedding
-        query_embedding = self.embeddings[doc_index:doc_index+1]
-        
-        # Search (top_k + 1 to exclude the document itself)
-        scores, indices = self.index.search(
-            query_embedding.astype(np.float32),
-            top_k + 1
-        )
-        
-        # Filter out the document itself and convert to list
-        results = [
-            (int(idx), float(score)) 
-            for idx, score in zip(indices[0], scores[0])
-            if idx != doc_index
-        ][:top_k]
-        
-        return results
-    
-    def save(self, save_dir: str) -> None:
-        """
-        Save index and embeddings.
-        
-        Args:
-            save_dir: Directory to save files
-        """
-        if self.index is None or self.embeddings is None:
-            raise ValueError("No index to save. Build index first.")
-        
-        save_path = Path(save_dir)
-        save_path.mkdir(parents=True, exist_ok=True)
-        
-        # Save FAISS index
-        index_path = save_path / "faiss_index.bin"
-        faiss.write_index(self.index, str(index_path))
-        logger.info(f"FAISS index saved to {index_path}")
-        
-        # Save embeddings
-        embeddings_path = save_path / "embeddings.npy"
-        np.save(embeddings_path, self.embeddings)
-        logger.info(f"Embeddings saved to {embeddings_path}")
-        
-        # Save metadata
-        metadata = {
-            'model_name': self.model_name,
-            'device': self.device,
-            'normalize_embeddings': self.normalize_embeddings,
-            'embedding_dim': self.embedding_dim,
-            'corpus_size': self.corpus_size
-        }
-        metadata_path = save_path / "semantic_metadata.pkl"
-        with open(metadata_path, 'wb') as f:
-            pickle.dump(metadata, f)
-        logger.info(f"Metadata saved to {metadata_path}")
-    
-    def load(self, save_dir: str) -> None:
-        """
-        Load index and embeddings.
-        
-        Args:
-            save_dir: Directory containing saved files
-        """
-        load_path = Path(save_dir)
-        
-        if not load_path.exists():
-            raise FileNotFoundError(f"Save directory not found: {save_dir}")
-        
-        # Load metadata
-        metadata_path = load_path / "semantic_metadata.pkl"
-        with open(metadata_path, 'rb') as f:
-            metadata = pickle.load(f)
-        
-        # Verify model compatibility
-        if metadata['model_name'] != self.model_name:
-            logger.warning(
-                f"Loaded metadata model ({metadata['model_name']}) "
-                f"differs from current model ({self.model_name})"
-            )
-        
-        # Load FAISS index
-        index_path = load_path / "faiss_index.bin"
-        self.index = faiss.read_index(str(index_path))
-        logger.info(f"FAISS index loaded from {index_path}")
-        
-        # Load embeddings
-        embeddings_path = load_path / "embeddings.npy"
-        self.embeddings = np.load(embeddings_path)
-        logger.info(f"Embeddings loaded from {embeddings_path}")
-        
-        # Set attributes
-        self.embedding_dim = metadata['embedding_dim']
-        self.corpus_size = metadata['corpus_size']
-        self.normalize_embeddings = metadata['normalize_embeddings']
-    
-    def get_statistics(self) -> Dict[str, Any]:
-        """
-        Get semantic retriever statistics.
-        
-        Returns:
-            Dictionary of statistics
-        """
-        if self.index is None:
-            return {'status': 'not_built'}
-        
-        stats = {
-            'status': 'built',
-            'model_name': self.model_name,
-            'embedding_dim': self.embedding_dim,
-            'corpus_size': self.corpus_size,
-            'normalize_embeddings': self.normalize_embeddings,
-            'device': self.device,
-            'index_type': type(self.index).__name__,
-            'total_vectors': self.index.ntotal if self.index else 0
-        }
-        
-        if self.embeddings is not None:
-            stats['embedding_memory_mb'] = self.embeddings.nbytes / (1024 * 1024)
-        
-        return stats
-    
+            normalize_embeddings=self.normalize_embeddings,
+        )[0]
+
     def __repr__(self) -> str:
-        """String representation."""
         if self.index is None:
             return f"SemanticRetriever(model={self.model_name}, status=not_built)"
-        return (f"SemanticRetriever(model={self.model_name}, "
-                f"corpus_size={self.corpus_size}, dim={self.embedding_dim})")
+        return (
+            f"SemanticRetriever(model={self.model_name}, "
+            f"type={self._actual_index_type}, "
+            f"n={self.corpus_size:,}, dim={self.embedding_dim})"
+        )

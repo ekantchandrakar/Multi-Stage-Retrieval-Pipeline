@@ -1,477 +1,215 @@
-# 🚀 Getting Started with Hybrid Search System
+# Getting Started — Hybrid Search System v2
 
-Welcome! This guide will walk you through setting up and using the Hybrid Semantic Search System.
+## Prerequisites
 
-## 📋 Prerequisites Check
+- Python 3.8+
+- pip
+- 4 GB RAM minimum (8 GB recommended for 100 K corpus)
+- 3 GB free disk (models + FAISS index)
+- Internet connection (first run downloads StaQC + model weights)
 
-Before starting, ensure you have:
+---
 
-- ✅ Python 3.8 or higher (`python --version`)
-- ✅ pip package manager (`pip --version`)
-- ✅ 4GB RAM minimum
-- ✅ 2GB free disk space
-
-## 🎯 5-Minute Quick Start
-
-### Step 1: Navigate to Project Directory
+## 1. Install
 
 ```bash
+# Clone / extract the project
 cd hybrid_search_system
-```
 
-### Step 2: Install Dependencies
-
-```bash
-# Create virtual environment (recommended)
+# Create virtual environment
 python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
 
-# Activate it
-source venv/bin/activate  # Linux/Mac
-# OR
-venv\Scripts\activate     # Windows
-
-# Install packages
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### Step 3: Run the Demo
+---
+
+## 2. Run the Demo
 
 ```bash
 python main.py
 ```
 
-That's it! The system will:
+What happens on first run:
 
-1. Build search indices (~3-5 minutes first time)
-2. Run example searches
-3. Display results comparison
-4. Generate evaluation report
+1. Downloads `koutch/staqc` (python split, capped at 20 K by default)
+2. Downloads sentence-transformer model weights (~90 MB)
+3. Builds BM25 index (~30 s for 20 K docs)
+4. Builds FAISS index — auto-selects IVFFlat for 20 K docs (~2 min)
+5. Runs sample searches and prints comparison
+6. Runs IR evaluation (NDCG@10, MRR, Recall@10)
 
-## 📖 Detailed Setup Guide
+Subsequent runs: indices are loaded from disk in seconds.
 
-### Installation Options
+---
 
-#### Option A: Basic Installation
-
-```bash
-pip install -r requirements.txt
-```
-
-#### Option B: Development Installation
+## 3. Run the Evaluation Benchmark
 
 ```bash
-pip install -e .  # Installs package in editable mode
-pip install -r requirements.txt
+# Full benchmark (15 queries, NDCG@10 / MRR / Recall@10)
+python evaluate.py
+
+# Quick test with 5 queries
+python evaluate.py --queries 5
+
+# Benchmark only BM25
+python evaluate.py --search-type bm25
+
+# Use SQL dataset instead
+python evaluate.py --language sql
+
+# Larger corpus
+python evaluate.py --max-records 50000
 ```
 
-#### Option C: With Development Tools
+Output files:
+
+- `outputs/evaluation_report.json` — full per-query + aggregate results
+- `outputs/evaluation_summary.json` — compact summary for the API
+
+---
+
+## 4. Start the API Server
 
 ```bash
-pip install -r requirements.txt
-pip install pytest pytest-cov black flake8 mypy jupyter
+uvicorn src.api:app --reload --port 8000
 ```
 
-## 🔍 Understanding the System
+API docs: http://localhost:8000/docs
 
-### The Three Search Modes
+Key endpoints:
 
-1. **BM25 (Lexical)**
-   - Best for: Exact keyword matching
-   - Example: "SQL JOIN optimization"
-   - Speed: Very fast (~10-20ms)
+```bash
+# Hybrid search
+curl -X POST http://localhost:8000/api/v1/search/hybrid \
+  -H "Content-Type: application/json" \
+  -d '{"query": "reverse linked list Python", "top_k": 5}'
 
-2. **Semantic (Bi-Encoder)**
-   - Best for: Conceptual similarity
-   - Example: "How to make database faster?"
-   - Speed: Very fast (~5-15ms)
+# Pre-computed evaluation metrics (run evaluate.py first)
+curl http://localhost:8000/api/v1/admin/metrics
 
-3. **Hybrid (RRF + Cross-Encoder)**
-   - Best for: Optimal results
-   - Combines: BM25 + Semantic + Re-ranking
-   - Speed: Medium (~120-240ms)
-
-### Architecture Overview
-
-```
-Query → BM25 → ┐
-                ├→ RRF Fusion → Cross-Encoder → Top 5 Results
-Query → Semantic →┘
+# Corpus statistics + FAISS index info
+curl http://localhost:8000/api/v1/statistics
 ```
 
-## 💻 Code Examples
+---
 
-### Example 1: Simple Search
+## 5. Use in Your Own Code
+
+### Basic search
 
 ```python
 from src.search_engine import HybridSearchEngine
 
-# Initialize
-engine = HybridSearchEngine('data/semantic_search_dataset_2000.csv')
-
-# Build indices (first time only)
+engine = HybridSearchEngine(
+    data_path="staqc",
+    language="python",
+    max_records=20_000,
+    model_dir="models",
+)
 engine.build_indices()
 
-# Search!
-results = engine.search("reverse linked list", top_k=5)
-
-# Display
-for i, result in enumerate(results, 1):
-    print(f"{i}. {result['title']}")
-    print(f"   Score: {result['score']:.4f}")
-    print(f"   Category: {result['category']}\n")
+results = engine.search("implement binary search tree", top_k=5)
+for r in results:
+    print(f"[{r['rank']}] {r['title']}  (score={r['score']:.4f})")
 ```
 
-### Example 2: Compare All Methods
-
-```python
-# Compare BM25, Semantic, and Hybrid
-comparison = engine.compare_retrievers("optimize SQL queries", top_k=3)
-
-print("BM25 Top Result:")
-print(f"  {comparison['bm25'][0]['title']}")
-
-print("\nSemantic Top Result:")
-print(f"  {comparison['semantic'][0]['title']}")
-
-print("\nHybrid Top Result:")
-print(f"  {comparison['hybrid'][0]['title']}")
-```
-
-### Example 3: Batch Evaluation
-
-```python
-# Test multiple queries
-test_queries = [
-    "implement binary search tree",
-    "deploy microservice kubernetes",
-    "database indexing strategies"
-]
-
-results = engine.evaluate_on_queries(
-    test_queries,
-    save_path='outputs/my_evaluation.json'
-)
-
-print(f"Average search time: {results['statistics']['avg_search_time']:.3f}s")
-```
-
-### Example 4: Using Specific Search Mode
-
-```python
-# BM25 only
-bm25_results = engine.search(
-    "Python linked list",
-    search_type='bm25',
-    top_k=5
-)
-
-# Semantic only
-semantic_results = engine.search(
-    "data structure traversal",
-    search_type='semantic',
-    top_k=5
-)
-
-# Hybrid (default)
-hybrid_results = engine.search(
-    "optimize database performance",
-    search_type='hybrid',
-    top_k=5
-)
-```
-
-## 🎓 Interactive Learning
-
-### Jupyter Notebook Tutorial
-
-```bash
-# Start Jupyter
-jupyter notebook
-
-# Open the analysis notebook
-# Navigate to: notebooks/evaluation_analysis.ipynb
-```
-
-The notebook includes:
-
-- Step-by-step walkthrough
-- Visual comparisons
-- Performance analysis
-- Interactive examples
-
-## 🧪 Testing Your Installation
-
-### Run Unit Tests
-
-```bash
-# Run all tests
-pytest tests/
-
-# Run with verbose output
-pytest tests/ -v
-
-# Run specific test file
-pytest tests/test_hybrid_search.py
-
-# Run with coverage
-pytest --cov=src tests/
-```
-
-### Quick Validation
-
-```python
-# Quick test to ensure everything works
-from src.search_engine import HybridSearchEngine
-
-engine = HybridSearchEngine('data/semantic_search_dataset_2000.csv')
-print("✅ Engine initialized successfully!")
-
-# Check dataset
-print(f"✅ Dataset loaded: {len(engine.data_processor)} documents")
-```
-
-## 📊 Understanding the Dataset
-
-The dataset contains 2,000 technical Q&A documents:
-
-```python
-from src.data_processor import DataProcessor
-
-processor = DataProcessor('data/semantic_search_dataset_2000.csv')
-processor.load_data()
-stats = processor.get_statistics()
-
-print(f"Total Documents: {stats['total_documents']}")
-print(f"Categories: {list(stats['categories'].keys())}")
-print(f"Difficulty Levels: {list(stats['difficulty_levels'].keys())}")
-```
-
-## 🎯 Common Use Cases
-
-### Use Case 1: Technical Documentation Search
-
-```python
-# Good for: Finding specific code examples
-results = engine.search(
-    "implement JWT authentication in Node.js",
-    search_type='hybrid',
-    top_k=5
-)
-```
-
-### Use Case 2: Conceptual Queries
-
-```python
-# Good for: Understanding concepts
-results = engine.search(
-    "What are ACID properties and why are they important?",
-    search_type='semantic',
-    top_k=5
-)
-```
-
-### Use Case 3: Exact Keyword Matching
-
-```python
-# Good for: Finding documents with specific terms
-results = engine.search(
-    "Kubernetes StatefulSet deployment",
-    search_type='bm25',
-    top_k=5
-)
-```
-
-## ⚙️ Configuration
-
-### Customize Model Settings
-
-Edit `configs/model_config.yaml`:
-
-```yaml
-bi_encoder:
-  model_name: "sentence-transformers/all-MiniLM-L6-v2"
-  device: "cpu" # Change to "cuda" for GPU
-
-cross_encoder:
-  model_name: "cross-encoder/ms-marco-MiniLM-L-6-v2"
-  device: "cpu"
-```
-
-### Customize Search Settings
-
-Edit `configs/search_config.yaml`:
-
-```yaml
-rrf_fusion:
-  k: 60 # RRF constant
-
-cross_encoder_rerank:
-  top_k: 5 # Number of final results
-```
-
-### Programmatic Configuration
-
-```python
-# Custom BM25 parameters
-from src.bm25_retriever import BM25Retriever
-bm25 = BM25Retriever(k1=1.2, b=0.75)
-
-# Custom RRF parameter
-from src.hybrid_fusion import HybridFusion
-fusion = HybridFusion(k=40)
-```
-
-## 🐛 Troubleshooting
-
-### Problem: "Index not built" error
-
-**Solution:**
-
-```python
-engine.build_indices()  # Build indices first
-```
-
-### Problem: Slow first run
-
-**Why:** Downloading models and building indices
-**Solution:** This is normal. Subsequent runs are much faster.
-
-### Problem: Out of memory
-
-**Solution:** Reduce batch size
-
-```python
-engine.semantic_retriever.build_index(
-    corpus,
-    batch_size=16  # Reduce from default 32
-)
-```
-
-### Problem: Import errors
-
-**Solution:** Ensure all dependencies installed
-
-```bash
-pip install -r requirements.txt --upgrade
-```
-
-## 📈 Performance Optimization
-
-### Use GPU (if available)
+### Control FAISS index type
 
 ```python
 engine = HybridSearchEngine(
-    data_path='data/semantic_search_dataset_2000.csv',
-    device='cuda'
+    data_path="staqc",
+    max_records=100_000,
+    index_type="ivf",   # force IVFFlat
+    nlist=512,
+    nprobe=32,
 )
 ```
 
-### Reduce Re-ranking Candidates
+### Evaluate search quality
 
 ```python
-# Faster but potentially lower quality
-results = engine.search(
-    query,
-    top_k=5,
-    retrieve_k=20  # Default: 50
+from src.evaluation import EvaluationSuite, GroundTruthBuilder, IRMetrics
+
+# Single query
+m = IRMetrics.evaluate_query(
+    retrieved=[r["id"] for r in engine.search("sort list python", top_k=10)],
+    relevant={"doc_42", "doc_77"},
+    k=10,
 )
+print(m)  # {'ndcg@10': 0.86, 'mrr': 1.0, 'recall@10': 0.5, ...}
+
+# Full benchmark
+gtb = GroundTruthBuilder(engine.metadata)
+gt  = gtb.build_from_keywords(my_queries, min_relevance=2)
+suite = EvaluationSuite(engine, k=10)
+report = suite.run(my_queries, gt, search_types=["bm25","semantic","hybrid"])
+suite.print_report(report)
+suite.save_report(report, "outputs/my_eval.json")
 ```
 
-### Load Pre-built Indices
+---
+
+## 6. Changing Dataset Size
+
+Edit `main.py` or pass arguments to `evaluate.py`:
+
+| max_records | FAISS type (auto) | Build time | RAM   |
+| ----------- | ----------------- | ---------- | ----- |
+| 2 000       | IndexFlatIP       | ~1 min     | ~1 GB |
+| 20 000      | IndexIVFFlat      | ~3 min     | ~2 GB |
+| 100 000     | IndexIVFFlat      | ~15 min    | ~4 GB |
+
+To use full StaQC (148 K python questions):
 
 ```python
-# Skip building if indices already exist
-engine = HybridSearchEngine('data/semantic_search_dataset_2000.csv')
-engine.load_indices()  # Fast!
-results = engine.search("your query")
+engine = HybridSearchEngine(data_path="staqc", max_records=0)  # 0 = no cap
 ```
 
-## 📚 Next Steps
+---
 
-### Beginner Path
+## 7. Run Tests
 
-1. ✅ Run `main.py`
-2. ✅ Try example code above
-3. ✅ Open Jupyter notebook
-4. ✅ Experiment with different queries
+```bash
+# All tests
+pytest tests/ -v
 
-### Intermediate Path
+# Only new-feature tests
+pytest tests/ -v -k "IVF or NDCG or MRR or Recall or StaQC"
 
-1. ✅ Read `ARCHITECTURE.md`
-2. ✅ Modify configuration files
-3. ✅ Run unit tests
-4. ✅ Extend with custom retrievers
+# With coverage
+pytest tests/ --cov=src --cov-report=term-missing
+```
 
-### Advanced Path
+---
 
-1. ✅ Study source code
-2. ✅ Implement custom fusion
-3. ✅ Fine-tune models
-4. ✅ Deploy as API service
+## Troubleshooting
 
-## 🎓 Learning Resources
+**HuggingFace download fails**
 
-### Included Documentation
+```bash
+pip install -U datasets huggingface_hub
+# Or set HF_ENDPOINT if behind a proxy
+export HF_ENDPOINT=https://hf-mirror.com
+```
 
-- `README.md` - Complete overview
-- `QUICKSTART.md` - Fast setup
-- `ARCHITECTURE.md` - System design
-- `PROJECT_SUMMARY.md` - Project overview
-
-### Code Examples
-
-- `main.py` - Comprehensive demo
-- `tests/test_hybrid_search.py` - Usage examples
-- `notebooks/evaluation_analysis.ipynb` - Interactive tutorial
-
-## 🤝 Getting Help
-
-### Check Documentation
-
-1. Start with `README.md`
-2. Review `QUICKSTART.md`
-3. Deep dive with `ARCHITECTURE.md`
-
-### Code Examples
-
-Look at:
-
-- `main.py` for complete workflows
-- Test files for specific features
-- Jupyter notebook for analysis
-
-### Debug Mode
+**Out of memory during FAISS build**
 
 ```python
-import logging
-logging.basicConfig(level=logging.DEBUG)
-
-# Now run your code with detailed logs
+# Reduce batch size
+engine.semantic_retriever.build_index(corpus, batch_size=32)
 ```
 
-## ✅ Verification Checklist
-
-Before starting, verify:
-
-- [ ] Python 3.8+ installed
-- [ ] Dependencies installed (`pip list`)
-- [ ] Dataset present (`data/semantic_search_dataset_2000.csv`)
-- [ ] Sufficient disk space (~2GB)
-- [ ] Virtual environment activated (recommended)
-
-## 🎉 You're Ready!
-
-Your hybrid search system is ready to use. Start with:
+**FAISS index accuracy too low (IVF)**
 
 ```python
-from src.search_engine import HybridSearchEngine
-
-engine = HybridSearchEngine('data/semantic_search_dataset_2000.csv')
-engine.build_indices()
-results = engine.search("your first query!", top_k=5)
-
-for r in results:
-    print(f"✨ {r['title']}")
+engine.semantic_retriever.set_nprobe(64)  # default ~nlist*0.05
 ```
 
-Happy searching! 🔍
+**Force rebuild after corpus change**
+
+```python
+engine.build_indices(force_rebuild=True)
+```

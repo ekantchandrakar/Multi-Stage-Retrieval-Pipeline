@@ -1,275 +1,189 @@
 """
-BM25 Retriever for Lexical Search
-Implements Best Matching 25 algorithm for keyword-based retrieval
+BM25 Retriever – production-grade lexical search
+=================================================
+Uses rank-bm25 (BM25Okapi) with a lightweight, regex-based tokeniser
+that handles code snippets well (camelCase splitting, operator removal).
 """
-import pickle
-from pathlib import Path
-from typing import List, Tuple, Dict, Any
-import numpy as np
 
+import logging
+import pickle
+import re
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+import numpy as np
 from rank_bm25 import BM25Okapi
 
-from .utils import setup_logger, tokenize_text, timing_decorator
+from .utils import setup_logger, timing_decorator
 
 logger = setup_logger(__name__)
 
+# ---------------------------------------------------------------------------
+# Tokeniser
+# ---------------------------------------------------------------------------
+
+_CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+_TOKEN_RE = re.compile(r"\b\w+\b")
+
+
+def tokenize_text(text: str) -> List[str]:
+    """
+    Tokenise *text* into lowercase tokens.
+
+    Steps
+    -----
+    1. Split camelCase / PascalCase identifiers.
+    2. Extract all word-character sequences.
+    3. Lowercase.
+    4. Discard pure-digit tokens shorter than 2 chars and very short tokens.
+    """
+    text = _CAMEL_RE.sub(" ", text)
+    tokens = _TOKEN_RE.findall(text.lower())
+    return [t for t in tokens if len(t) > 1 and not (t.isdigit() and len(t) < 3)]
+
+
+# ---------------------------------------------------------------------------
+# BM25Retriever
+# ---------------------------------------------------------------------------
 
 class BM25Retriever:
     """
-    BM25-based lexical retriever for keyword matching.
-    
-    BM25 (Best Matching 25) is a probabilistic ranking function that:
-    - Considers term frequency (TF)
-    - Applies inverse document frequency (IDF)
-    - Includes document length normalization
+    BM25-based lexical retriever.
+
+    Parameters
+    ----------
+    k1 : float   Term-frequency saturation  (typical 1.2–2.0)
+    b  : float   Length normalisation       (0 = off, 1 = full)
+    epsilon : float  IDF floor value
     """
-    
-    def __init__(self, 
-                 k1: float = 1.5,
-                 b: float = 0.75,
-                 epsilon: float = 0.25):
-        """
-        Initialize BM25 Retriever.
-        
-        Args:
-            k1: Term frequency saturation parameter (default: 1.5)
-                - Higher values increase the impact of term frequency
-                - Typical range: 1.2 to 2.0
-            b: Length normalization parameter (default: 0.75)
-                - Controls how much document length affects ranking
-                - Range: 0 (no normalization) to 1 (full normalization)
-            epsilon: Floor value for IDF (default: 0.25)
-                - Prevents zero IDF for very common terms
-        """
+
+    def __init__(self, k1: float = 1.5, b: float = 0.75, epsilon: float = 0.25):
         self.k1 = k1
         self.b = b
         self.epsilon = epsilon
-        self.bm25 = None
-        self.tokenized_corpus = []
-        self.corpus_size = 0
-        
-        logger.info(f"Initialized BM25Retriever with k1={k1}, b={b}, epsilon={epsilon}")
-    
+
+        self.bm25: BM25Okapi | None = None
+        self.tokenized_corpus: List[List[str]] = []
+        self.corpus_size: int = 0
+
+        logger.info(f"BM25Retriever(k1={k1}, b={b}, epsilon={epsilon})")
+
+    # ------------------------------------------------------------------
+    # Index building
+    # ------------------------------------------------------------------
+
     @timing_decorator
     def build_index(self, corpus: List[str]) -> None:
-        """
-        Build BM25 index from corpus.
-        
-        Args:
-            corpus: List of document texts
-        """
-        logger.info(f"Building BM25 index for {len(corpus)} documents")
-        
-        # Tokenize corpus
+        logger.info(f"Tokenising {len(corpus):,} documents …")
         self.tokenized_corpus = [tokenize_text(doc) for doc in corpus]
         self.corpus_size = len(corpus)
-        
-        # Build BM25 index
+
+        logger.info("Building BM25Okapi index …")
         self.bm25 = BM25Okapi(
             self.tokenized_corpus,
             k1=self.k1,
             b=self.b,
-            epsilon=self.epsilon
+            epsilon=self.epsilon,
         )
-        
-        logger.info(f"BM25 index built successfully with {self.corpus_size} documents")
-    
+        logger.info("BM25 index ready")
+
+    # ------------------------------------------------------------------
+    # Search
+    # ------------------------------------------------------------------
+
     @timing_decorator
     def search(self, query: str, top_k: int = 50) -> List[Tuple[int, float]]:
-        """
-        Search using BM25.
-        
-        Args:
-            query: Search query
-            top_k: Number of results to return
-            
-        Returns:
-            List of (document_index, score) tuples sorted by score
-        """
         if self.bm25 is None:
-            raise ValueError("BM25 index not built. Call build_index() first.")
-        
-        # Tokenize query
-        query_tokens = tokenize_text(query)
-        
-        # Get BM25 scores
-        scores = self.bm25.get_scores(query_tokens)
-        
-        # Get top-k results
+            raise RuntimeError("Call build_index() first.")
+
+        tokens = tokenize_text(query)
+        scores = self.bm25.get_scores(tokens)
+
         top_indices = np.argsort(scores)[::-1][:top_k]
-        top_scores = scores[top_indices]
-        
-        results = [(int(idx), float(score)) for idx, score in zip(top_indices, top_scores)]
-        
-        logger.debug(f"BM25 search returned {len(results)} results for query: '{query}'")
-        
-        return results
-    
-    def batch_search(self, queries: List[str], top_k: int = 50) -> List[List[Tuple[int, float]]]:
-        """
-        Perform batch search for multiple queries.
-        
-        Args:
-            queries: List of search queries
-            top_k: Number of results per query
-            
-        Returns:
-            List of search results for each query
-        """
-        logger.info(f"Performing batch BM25 search for {len(queries)} queries")
-        
-        results = []
-        for query in queries:
-            query_results = self.search(query, top_k)
-            results.append(query_results)
-        
-        return results
-    
-    def get_term_frequencies(self, query: str) -> Dict[str, int]:
-        """
-        Get term frequencies in the corpus for query terms.
-        
-        Args:
-            query: Search query
-            
-        Returns:
-            Dictionary mapping terms to their document frequencies
-        """
-        if self.bm25 is None:
-            raise ValueError("BM25 index not built.")
-        
-        query_tokens = tokenize_text(query)
-        term_freqs = {}
-        
-        for term in query_tokens:
-            # Count documents containing the term
-            doc_freq = sum(1 for doc_tokens in self.tokenized_corpus if term in doc_tokens)
-            term_freqs[term] = doc_freq
-        
-        return term_freqs
-    
+        return [(int(i), float(scores[i])) for i in top_indices]
+
+    def batch_search(
+        self, queries: List[str], top_k: int = 50
+    ) -> List[List[Tuple[int, float]]]:
+        return [self.search(q, top_k) for q in queries]
+
+    # ------------------------------------------------------------------
+    # Diagnostics
+    # ------------------------------------------------------------------
+
     def explain_score(self, query: str, doc_index: int) -> Dict[str, Any]:
-        """
-        Explain BM25 score for a specific document.
-        
-        Args:
-            query: Search query
-            doc_index: Document index
-            
-        Returns:
-            Dictionary with score explanation
-        """
         if self.bm25 is None:
-            raise ValueError("BM25 index not built.")
-        
-        query_tokens = tokenize_text(query)
+            raise RuntimeError("Not built.")
+        tokens = tokenize_text(query)
         doc_tokens = self.tokenized_corpus[doc_index]
-        
-        # Calculate score components
-        score = self.bm25.get_scores(query_tokens)[doc_index]
-        
-        # Get term-level details
+        score = float(self.bm25.get_scores(tokens)[doc_index])
         term_details = {}
-        for term in query_tokens:
-            term_freq = doc_tokens.count(term)
-            doc_freq = sum(1 for doc in self.tokenized_corpus if term in doc)
-            
-            term_details[term] = {
-                'term_frequency': term_freq,
-                'document_frequency': doc_freq,
-                'in_document': term in doc_tokens
+        for t in tokens:
+            term_details[t] = {
+                "tf": doc_tokens.count(t),
+                "df": sum(1 for d in self.tokenized_corpus if t in d),
+                "in_doc": t in doc_tokens,
             }
-        
-        explanation = {
-            'document_index': doc_index,
-            'total_score': float(score),
-            'document_length': len(doc_tokens),
-            'query_terms': query_tokens,
-            'term_details': term_details
+        return {
+            "doc_index": doc_index,
+            "score": score,
+            "doc_length": len(doc_tokens),
+            "terms": term_details,
         }
-        
-        return explanation
-    
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
     def save(self, filepath: str) -> None:
-        """
-        Save BM25 index to file.
-        
-        Args:
-            filepath: Path to save the index
-        """
         if self.bm25 is None:
-            raise ValueError("No index to save. Build index first.")
-        
-        save_path = Path(filepath)
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        save_data = {
-            'bm25': self.bm25,
-            'tokenized_corpus': self.tokenized_corpus,
-            'corpus_size': self.corpus_size,
-            'k1': self.k1,
-            'b': self.b,
-            'epsilon': self.epsilon
+            raise RuntimeError("Nothing to save.")
+        p = Path(filepath)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "bm25": self.bm25,
+            "tokenized_corpus": self.tokenized_corpus,
+            "corpus_size": self.corpus_size,
+            "k1": self.k1,
+            "b": self.b,
+            "epsilon": self.epsilon,
         }
-        
-        with open(save_path, 'wb') as f:
-            pickle.dump(save_data, f)
-        
-        logger.info(f"BM25 index saved to {filepath}")
-    
+        with open(p, "wb") as f:
+            pickle.dump(payload, f, protocol=4)
+        logger.info(f"BM25 index saved → {filepath}")
+
     def load(self, filepath: str) -> None:
-        """
-        Load BM25 index from file.
-        
-        Args:
-            filepath: Path to load the index from
-        """
-        load_path = Path(filepath)
-        
-        if not load_path.exists():
-            raise FileNotFoundError(f"Index file not found: {filepath}")
-        
-        with open(load_path, 'rb') as f:
-            save_data = pickle.load(f)
-        
-        self.bm25 = save_data['bm25']
-        self.tokenized_corpus = save_data['tokenized_corpus']
-        self.corpus_size = save_data['corpus_size']
-        self.k1 = save_data['k1']
-        self.b = save_data['b']
-        self.epsilon = save_data['epsilon']
-        
-        logger.info(f"BM25 index loaded from {filepath}")
-    
+        p = Path(filepath)
+        if not p.exists():
+            raise FileNotFoundError(filepath)
+        with open(p, "rb") as f:
+            d = pickle.load(f)
+        self.bm25 = d["bm25"]
+        self.tokenized_corpus = d["tokenized_corpus"]
+        self.corpus_size = d["corpus_size"]
+        self.k1 = d["k1"]
+        self.b = d["b"]
+        self.epsilon = d["epsilon"]
+        logger.info(f"BM25 index loaded ← {filepath} ({self.corpus_size:,} docs)")
+
+    # ------------------------------------------------------------------
+    # Stats / repr
+    # ------------------------------------------------------------------
+
     def get_statistics(self) -> Dict[str, Any]:
-        """
-        Get BM25 index statistics.
-        
-        Returns:
-            Dictionary of statistics
-        """
         if self.bm25 is None:
-            return {'status': 'not_built'}
-        
-        vocab_size = len(set(token for doc in self.tokenized_corpus for token in doc))
-        avg_doc_length = np.mean([len(doc) for doc in self.tokenized_corpus])
-        
-        stats = {
-            'status': 'built',
-            'corpus_size': self.corpus_size,
-            'vocabulary_size': vocab_size,
-            'avg_document_length': float(avg_doc_length),
-            'parameters': {
-                'k1': self.k1,
-                'b': self.b,
-                'epsilon': self.epsilon
-            }
+            return {"status": "not_built"}
+        vocab = set(t for doc in self.tokenized_corpus for t in doc)
+        avg_len = np.mean([len(d) for d in self.tokenized_corpus])
+        return {
+            "status": "built",
+            "corpus_size": self.corpus_size,
+            "vocabulary_size": len(vocab),
+            "avg_document_length": float(avg_len),
+            "parameters": {"k1": self.k1, "b": self.b, "epsilon": self.epsilon},
         }
-        
-        return stats
-    
+
     def __repr__(self) -> str:
-        """String representation."""
         if self.bm25 is None:
-            return "BM25Retriever(status=not_built)"
-        return f"BM25Retriever(corpus_size={self.corpus_size}, k1={self.k1}, b={self.b})"
+            return "BM25Retriever(not_built)"
+        return f"BM25Retriever(n={self.corpus_size:,}, k1={self.k1}, b={self.b})"

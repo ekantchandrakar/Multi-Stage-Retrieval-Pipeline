@@ -1,89 +1,95 @@
-# Search Configuration for Hybrid Search System
+# search_config.yaml
+# ==================
 
-# BM25 Search Parameters
+# ── Dataset  ────────────────────────────────────────────────────────────────
+dataset:
+  source: "staqc" # "staqc"  OR  path/to/legacy.csv
+
+  # Valid StaQC config names (must match HuggingFace exactly):
+  #   man_python  – manually curated Python  (~148 K records)
+  #   man_sql     – manually curated SQL     (~120 K records)
+  #   mca_python  – multi-code-answer Python (~60 K records)
+  #
+  # Convenience aliases also accepted: "python" → man_python, "sql" → man_sql
+  language: "man_python"
+
+  max_records: 20000 # 0 = no cap; use 2000 to replicate old behaviour
+  cache_dir: "models/data_cache"
+
+# ── BM25 ────────────────────────────────────────────────────────────────────
 bm25_search:
-  top_k: 50  # Number of results to retrieve
-  min_score: 0.0  # Minimum score threshold
-  
-# Semantic Search Parameters
-semantic_search:
-  top_k: 50  # Number of results to retrieve
-  similarity_metric: "cosine"  # Options: "cosine", "dot_product", "euclidean"
-  min_similarity: 0.0  # Minimum similarity threshold
+  top_k: 50
+  min_score: 0.0
 
-# Reciprocal Rank Fusion (RRF) Parameters
+# ── Semantic ────────────────────────────────────────────────────────────────
+semantic_search:
+  top_k: 50
+  similarity_metric: "cosine"
+  min_similarity: 0.0
+
+# ── RRF Fusion ──────────────────────────────────────────────────────────────
 rrf_fusion:
-  k: 60  # Constant for RRF formula (standard value)
-  top_k: 50  # Number of fused candidates
-  
-  # Weighting strategy (optional)
+  k: 60
+  top_k: 50
   use_weights: false
   bm25_weight: 0.5
   semantic_weight: 0.5
 
-# Cross-Encoder Re-ranking Parameters
+# ── Cross-encoder re-ranking ─────────────────────────────────────────────────
 cross_encoder_rerank:
-  top_k: 5  # Final number of results to return
-  batch_size: 16
-  min_score: null  # Optional score threshold
+  top_k: 5
+  batch_size: 32
+  min_score: null
 
-# Query Processing
+# ── Query processing ─────────────────────────────────────────────────────────
 query_processing:
   lowercase: true
   strip_whitespace: true
   remove_special_chars: false
   max_query_length: 512
 
-# Search Modes
+# ── Search modes ─────────────────────────────────────────────────────────────
 search_modes:
-  default: "hybrid"  # Options: "bm25", "semantic", "hybrid"
-  
-  # Mode-specific settings
+  default: "hybrid"
   bm25_only:
     top_k: 5
-    
   semantic_only:
     top_k: 5
-    
   hybrid:
-    retrieve_k: 50  # Candidates from each retriever
-    rerank_k: 5     # Final results after re-ranking
+    retrieve_k: 50
+    rerank_k: 5
 
-# Caching
+# ── Caching ──────────────────────────────────────────────────────────────────
 caching:
   enable_query_cache: true
-  cache_size: 1000  # Number of queries to cache
-  cache_ttl: 3600   # Time to live in seconds
+  cache_size: 1000
+  cache_ttl: 3600
 
-# Performance
-performance:
-  enable_parallel_search: false
-  num_threads: 4
-  
-# Logging and Debugging
+# ── Evaluation (NDCG / MRR / Recall) ─────────────────────────────────────────
+evaluation:
+  k: 10
+  search_types:
+    - bm25
+    - semantic
+    - hybrid
+  ground_truth:
+    strategy: "keyword_match"
+    min_relevance: 2
+  test_queries:
+    - "reverse a linked list in Python"
+    - "implement binary search tree in Python"
+    - "Adding a simple value to a string"
+    - "how to use list comprehension in Python"
+    - "How can I sort a 2D list?"
+    - In Python, can I call the variable from main function - use global variable?
+
+# ── Logging ──────────────────────────────────────────────────────────────────
 logging:
   log_queries: true
   log_results: false
-  log_level: "INFO"  # Options: "DEBUG", "INFO", "WARNING", "ERROR"
-  
-# Evaluation
-evaluation:
-  # Test queries for evaluation
-  test_queries:
-    - "reverse singly linked list"
-    - "optimize SQL join performance"
-    - "deploy microservice on kubernetes"
-    - "reduce API latency in production"
-    - "implement binary search tree"
-    - "explain ACID properties in databases"
-    - "design scalable REST API"
-    - "kubernetes pod autoscaling"
-    - "database indexing strategies"
-    - "implement heap data structure"
-  
-  # Metrics to compute
-  compute_metrics:
-    - "precision"
-    - "recall"
-    - "ndcg"
-    - "mrr"
+  log_level: "INFO"
+
+# ── Performance ───────────────────────────────────────────────────────────────
+performance:
+  enable_parallel_search: false
+  num_threads: 4
