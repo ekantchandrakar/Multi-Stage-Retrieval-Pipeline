@@ -1,338 +1,187 @@
-# 🚀 Hybrid Semantic Search System
+# 🚀 Hybrid Semantic Search System v2
 
-A production-grade hybrid retrieval system combining lexical (BM25) and semantic (Transformer) search with advanced re-ranking capabilities.
+A production-grade hybrid retrieval system combining lexical (BM25) and semantic (Transformer + IVF-FAISS) search with cross-encoder re-ranking and full IR evaluation.
 
-## 🎯 Project Overview
+## What's New in v2
 
-This system implements a state-of-the-art hybrid search architecture that:
+| Feature            | Detail                                                                                       |
+| ------------------ | -------------------------------------------------------------------------------------------- |
+| **StaQC Dataset**  | Replaces the 2 K CSV — loads up to 100 K+ records from `koutch/staqc` on HuggingFace         |
+| **Adaptive FAISS** | Auto-selects `IndexFlatIP` (< 10 K docs), `IndexIVFFlat` (< 500 K), or `IndexIVFPQ` (500 K+) |
+| **IR Evaluation**  | `NDCG@10`, `MRR`, `Recall@10`, `Precision@10`, `MAP` via `EvaluationSuite`                   |
 
-- **Combines** lexical (BM25) and semantic (Bi-Encoder) retrieval strategies
-- **Fuses** rankings using Reciprocal Rank Fusion (RRF)
-- **Re-ranks** results using Cross-Encoder for precision optimization
-- **Demonstrates** real-world retrieval trade-offs and performance comparisons
-
-## 🏗️ System Architecture
+## Architecture
 
 ```
-                Query
-                   │
-         ┌─────────┴─────────┐
-         │                   │
-      BM25               Bi-Encoder
-   (Lexical)            (Semantic)
-         │                   │
-         └─────────┬─────────┘
-                   │
-                RRF Fusion
-                   │
-            Top 50 Candidates
-                   │
-         Cross-Encoder Rerank
-                   │
-              Final Top 5
+Query
+  │
+  ├─► BM25Retriever          (lexical, top-50)
+  │
+  ├─► SemanticRetriever      (IVF-FAISS, top-50)
+  │         └─ auto: Flat / IVFFlat / IVFPQ
+  │
+  ├─► HybridFusion (RRF)     (fuse → top-50)
+  │
+  └─► CrossEncoderReranker   (re-rank → top-5)
 ```
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 hybrid_search_system/
-├── README.md                          # Project documentation
-├── requirements.txt                   # Python dependencies
-├── setup.py                          # Package setup
-├── .gitignore                        # Git ignore rules
+├── main.py                      # Full demo (dataset + IVF + metrics)
+├── evaluate.py                  # Standalone IR evaluation runner  ← NEW
+├── requirements.txt
+├── setup.py
 │
-├── configs/                          # Configuration files
-│   ├── model_config.yaml            # Model configurations
-│   └── search_config.yaml           # Search parameters
+├── configs/
+│   ├── model_config.yaml        # IVF nlist/nprobe settings added
+│   └── search_config.yaml       # Dataset + evaluation config added
 │
-├── data/                             # Data directory
-│   └── semantic_search_dataset_2000.csv
+├── src/
+│   ├── __init__.py              # Exports all public classes
+│   ├── dataset_loader.py        # NEW – StaQC HuggingFace loader + DataProcessor
+│   ├── bm25_retriever.py        # Updated – camelCase tokeniser
+│   ├── semantic_retriever.py    # Updated – adaptive FAISS (Flat/IVF/IVFPQ)
+│   ├── hybrid_fusion.py         # Updated – cleaner weighted fuse
+│   ├── cross_encoder_reranker.py# Unchanged interface
+│   ├── search_engine.py         # Updated – StaQC + IVF wired in
+│   ├── evaluation.py            # NEW – NDCG, MRR, Recall, MAP, EvaluationSuite
+│   ├── utils.py                 # Updated – backwards-compatible
+│   └── api.py                   # Updated – /admin/metrics endpoint added
 │
-├── src/                              # Source code
-│   ├── __init__.py
-│   ├── data_processor.py            # Data loading and preprocessing
-│   ├── bm25_retriever.py            # BM25 lexical search
-│   ├── semantic_retriever.py        # Bi-Encoder semantic search
-│   ├── hybrid_fusion.py             # RRF fusion implementation
-│   ├── cross_encoder_reranker.py    # Cross-Encoder re-ranking
-│   ├── search_engine.py             # Main search engine orchestrator
-│   └── utils.py                     # Utility functions
-│
-├── models/                           # Saved models and indices
-│   ├── bm25_index.pkl
-│   ├── faiss_index.bin
-│   └── embeddings.npy
-│
-├── outputs/                          # Output results
-│   ├── evaluation_results.json
-│   └── example_queries.json
-│
-├── tests/                            # Unit tests
-│   ├── __init__.py
-│   ├── test_bm25.py
-│   ├── test_semantic.py
-│   └── test_hybrid.py
-│
-└── notebooks/                        # Jupyter notebooks
-    ├── 01_data_exploration.ipynb
-    ├── 02_retrieval_comparison.ipynb
-    └── 03_evaluation_analysis.ipynb
+└── tests/
+    └── test_hybrid_search.py    # Updated – covers all 3 new features
 ```
 
-## 🛠️ Installation
-
-### Prerequisites
-
-- Python 3.8+
-- pip
-
-### Setup
+## Quick Start
 
 ```bash
-# Clone the repository
-cd hybrid_search_system
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
+# 1. Install
+python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+
+# 2. Run full demo (downloads StaQC, builds IVF index, prints metrics)
+python main.py
+
+# 3. Run evaluation benchmark
+python evaluate.py --queries 10 --k 10
+
+# 4. Start API server
+uvicorn src.api:app --reload --port 8000
 ```
 
-## 🚀 Quick Start
-
-### 1. Build the Search System
+## Feature 1 – StaQC Dataset (2 K → 100 K)
 
 ```python
 from src.search_engine import HybridSearchEngine
 
-# Initialize the search engine
 engine = HybridSearchEngine(
-    data_path='data/semantic_search_dataset_2000.csv',
-    model_dir='models/'
+    data_path="staqc",      # triggers HuggingFace download
+    language="python",      # or "sql"
+    max_records=50_000,     # cap records; 0 = no cap
+    model_dir="models",
 )
-
-# Build indices (one-time setup)
 engine.build_indices()
 ```
 
-### 2. Perform Search
+The dataset is cached locally as Parquet after the first download — subsequent starts are instant.
+
+## Feature 2 – IR Evaluation Metrics
+
+### One-liner per query
 
 ```python
-# Search with hybrid approach
-results = engine.search(
-    query="reverse singly linked list",
-    top_k=5,
-    search_type='hybrid'  # Options: 'bm25', 'semantic', 'hybrid'
-)
+from src.evaluation import IRMetrics
 
-# Display results
-for i, result in enumerate(results, 1):
-    print(f"{i}. {result['title']}")
-    print(f"   Score: {result['score']:.4f}")
-    print(f"   Category: {result['category']} | Difficulty: {result['difficulty']}")
-    print()
+metrics = IRMetrics.evaluate_query(
+    retrieved=["doc_42", "doc_7", "doc_13"],
+    relevant={"doc_7", "doc_42"},
+    k=10,
+)
+# → {'ndcg@10': 0.93, 'mrr': 1.0, 'recall@10': 1.0, 'precision@10': 0.3, 'ap': 1.0}
 ```
 
-### 3. Compare Retrieval Methods
+### Full benchmark
 
 ```python
-# Compare all three approaches
-comparison = engine.compare_retrievers(
-    query="optimize SQL join performance"
-)
+from src.evaluation import EvaluationSuite, GroundTruthBuilder
 
-print("BM25 Results:", comparison['bm25'][:3])
-print("Semantic Results:", comparison['semantic'][:3])
-print("Hybrid Results:", comparison['hybrid'][:3])
+# Build pseudo-relevance labels (or supply your own)
+gtb = GroundTruthBuilder(engine.metadata)
+ground_truth = gtb.build_from_keywords(queries, min_relevance=2)
+
+suite = EvaluationSuite(engine, k=10)
+report = suite.run(queries, ground_truth, search_types=["bm25","semantic","hybrid"])
+suite.print_report(report)
+suite.save_report(report, "outputs/eval.json")
 ```
 
-## 📊 Dataset
+**When to run:** offline, after changing models or corpus — never per API request.
 
-**File**: `semantic_search_dataset_2000.csv`
+## Feature 3 – Adaptive FAISS Index
 
-**Fields**:
+| Corpus size  | Index type     | Notes                                |
+| ------------ | -------------- | ------------------------------------ |
+| < 10 K       | `IndexFlatIP`  | Exact, fastest for small sets        |
+| 10 K – 500 K | `IndexIVFFlat` | Approximate, auto-tuned nlist/nprobe |
+| ≥ 500 K      | `IndexIVFPQ`   | Compressed, memory-efficient         |
 
-- `id`: Unique identifier
-- `category`: Topic category (e.g., Data Structures, Algorithms, Databases)
-- `difficulty`: Beginner, Intermediate, Advanced
-- `title`: Question title
-- `body`: Detailed question description
-- `tags`: Comma-separated tags
-
-**Statistics**:
-
-- Total documents: 2,000
-- Categories: 6 (Data Structures, Algorithms, Databases, DevOps & Cloud, Backend Systems, etc.)
-- Difficulty levels: 3 (Beginner, Intermediate, Advanced)
-
-## 🔬 Components
-
-### 1. BM25 Retriever (Lexical Search)
-
-- **Algorithm**: BM25 (Best Matching 25)
-- **Strengths**: Exact term matching, keyword search
-- **Use Case**: Finding documents with specific technical terms
-
-### 2. Semantic Retriever (Bi-Encoder)
-
-- **Model**: `all-MiniLM-L6-v2`
-- **Index**: FAISS (Facebook AI Similarity Search)
-- **Strengths**: Understanding semantic similarity, handling synonyms
-- **Use Case**: Conceptual searches, paraphrased queries
-
-### 3. Reciprocal Rank Fusion (RRF)
-
-- **Formula**: `RRF(d) = Σ 1/(k + rank(d))` where k=60
-- **Purpose**: Merge rankings from multiple retrievers
-- **Benefit**: Combines strengths of both lexical and semantic approaches
-
-### 4. Cross-Encoder Re-ranker
-
-- **Model**: `cross-encoder/ms-marco-MiniLM-L-6-v2`
-- **Purpose**: Fine-grained relevance scoring
-- **Benefit**: Highest precision for final top-k results
-
-## 🎯 Evaluation
-
-### Test Queries
-
-The system includes hard test queries to demonstrate retrieval quality:
-
-1. **"reverse singly linked list"** - Tests exact term matching
-2. **"optimize SQL join performance"** - Tests database expertise
-3. **"deploy microservice on kubernetes"** - Tests DevOps knowledge
-4. **"reduce API latency in production"** - Tests backend systems
-5. **"implement binary search tree"** - Tests data structures
-6. **"explain ACID properties in databases"** - Tests conceptual understanding
-
-### Metrics
+Override manually:
 
 ```python
-from src.utils import evaluate_search_quality
-
-metrics = evaluate_search_quality(
-    engine=engine,
-    test_queries=['query1', 'query2', ...],
-    ground_truth=None  # Optional if available
+engine = HybridSearchEngine(
+    index_type="ivf",   # force IVFFlat regardless of corpus size
+    nlist=256,          # override auto nlist
+    nprobe=16,          # override auto nprobe
+    ...
 )
 ```
 
-## 🔧 Configuration
+Tune nprobe at runtime (trade accuracy for speed):
 
-### Model Configuration (`configs/model_config.yaml`)
-
-```yaml
-bi_encoder:
-  model_name: "all-MiniLM-L6-v2"
-  device: "cpu"
-  batch_size: 32
-
-cross_encoder:
-  model_name: "cross-encoder/ms-marco-MiniLM-L-6-v2"
-  device: "cpu"
-
-faiss:
-  index_type: "IndexFlatIP" # Inner product for normalized vectors
-  normalize: true
+```python
+engine.semantic_retriever.set_nprobe(32)
 ```
 
-### Search Configuration (`configs/search_config.yaml`)
+## API Endpoints
 
-```yaml
-bm25:
-  top_k: 50
-  k1: 1.5
-  b: 0.75
+| Method | Path                      | Description                                          |
+| ------ | ------------------------- | ---------------------------------------------------- |
+| POST   | `/api/v1/search/lexical`  | BM25 search                                          |
+| POST   | `/api/v1/search/semantic` | IVF-FAISS semantic search                            |
+| POST   | `/api/v1/search/hybrid`   | Full hybrid pipeline                                 |
+| POST   | `/api/v1/compare`         | All three side-by-side                               |
+| GET    | `/api/v1/statistics`      | Corpus + index stats                                 |
+| GET    | `/api/v1/admin/metrics`   | Pre-computed NDCG/MRR/Recall (run evaluate.py first) |
 
-semantic:
-  top_k: 50
-  normalize: true
+## Evaluation Metrics — Interpretation
 
-rrf:
-  k: 60
-  top_k: 50
+| Metric    | Formula                  | Good   | Excellent |
+| --------- | ------------------------ | ------ | --------- |
+| NDCG@10   | DCG / IDCG               | > 0.70 | > 0.85    |
+| MRR       | 1 / rank(first relevant) | > 0.70 | > 0.85    |
+| Recall@10 | hits / total relevant    | > 0.50 | > 0.75    |
+| MAP       | mean AP over queries     | > 0.50 | > 0.70    |
 
-cross_encoder:
-  top_k: 5
-  batch_size: 16
-```
-
-## 📈 Performance Considerations
-
-### Memory Usage
-
-- **BM25 Index**: ~50-100 MB for 2,000 documents
-- **FAISS Index**: ~3-5 MB (384-dim embeddings)
-- **Embeddings**: ~3 MB (2000 × 384 × 4 bytes)
-
-### Speed Benchmarks (approximate)
-
-- **BM25 Search**: ~10-20 ms
-- **Semantic Search**: ~5-15 ms (FAISS)
-- **RRF Fusion**: ~1-2 ms
-- **Cross-Encoder Re-ranking** (50 docs): ~100-200 ms
-- **Total Hybrid Search**: ~120-240 ms
-
-### Scalability
-
-- Handles up to 100K documents efficiently
-- For larger datasets, consider:
-  - Approximate nearest neighbor search (FAISS IVF)
-  - Distributed BM25 (Elasticsearch)
-  - GPU acceleration for embeddings
-
-## 🧪 Testing
-
-Run unit tests:
+## Running Tests
 
 ```bash
-# Run all tests
-pytest tests/
-
-# Run specific test
-pytest tests/test_hybrid.py -v
-
-# Run with coverage
-pytest --cov=src tests/
+pytest tests/ -v --tb=short
+pytest tests/ -v -k "TestSemanticRetrieverIVF"   # IVF tests only
+pytest tests/ -v -k "TestNDCG or TestMRR"         # metric tests only
 ```
 
-## 📚 API Reference
+## Performance
 
-### HybridSearchEngine
-
-```python
-class HybridSearchEngine:
-    def __init__(self, data_path: str, model_dir: str)
-    def build_indices(self) -> None
-    def search(self, query: str, top_k: int = 5, search_type: str = 'hybrid') -> List[Dict]
-    def compare_retrievers(self, query: str, top_k: int = 5) -> Dict
-    def save_models(self, path: str) -> None
-    def load_models(self, path: str) -> None
-```
-
-## 🤝 Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
-
-## 🙏 Acknowledgments
-
-- **sentence-transformers**: Hugging Face team
-- **rank-bm25**: dorianbrown
-- **FAISS**: Facebook Research
-- **Dataset**: Custom generated technical Q&A dataset
-
-## 📞 Contact
-
-For questions or issues, please open an issue on GitHub.
+| Component                     | Latency         |
+| ----------------------------- | --------------- |
+| BM25 search                   | ~10–20 ms       |
+| Semantic (IVFFlat, 50 K docs) | ~15–30 ms       |
+| RRF fusion                    | ~1–2 ms         |
+| Cross-encoder (50 docs)       | ~100–200 ms     |
+| **Total hybrid**              | **~130–250 ms** |
 
 ---
 
-**Built with ❤️ for production-grade semantic search**
+Built with ❤️ — BM25 + IVF-FAISS + Cross-Encoder + NDCG/MRR/Recall
