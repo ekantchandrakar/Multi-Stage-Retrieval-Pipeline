@@ -1,187 +1,209 @@
-# 🚀 Hybrid Semantic Search System v2
+# Hybrid Semantic Search System
 
-A production-grade hybrid retrieval system combining lexical (BM25) and semantic (Transformer + IVF-FAISS) search with cross-encoder re-ranking and full IR evaluation.
+A production-grade search system that combines keyword matching, semantic understanding, and neural re-ranking into a single pipeline. Built on top of real Stack Overflow Python Q&A data from the [StaQC dataset](https://huggingface.co/datasets/koutch/staqc).
 
-## What's New in v2
+---
 
-| Feature            | Detail                                                                                       |
-| ------------------ | -------------------------------------------------------------------------------------------- |
-| **StaQC Dataset**  | Replaces the 2 K CSV — loads up to 100 K+ records from `koutch/staqc` on HuggingFace         |
-| **Adaptive FAISS** | Auto-selects `IndexFlatIP` (< 10 K docs), `IndexIVFFlat` (< 500 K), or `IndexIVFPQ` (500 K+) |
-| **IR Evaluation**  | `NDCG@10`, `MRR`, `Recall@10`, `Precision@10`, `MAP` via `EvaluationSuite`                   |
+## What it does
+
+Most search systems pick one approach — either exact keyword matching or semantic similarity. This one uses both, fuses the results, then re-ranks with a neural model. In practice that means:
+
+- A query like **"reverse a linked list in Python"** through BM25 alone surfaces docs that literally contain those words ("using dictionaries and linked list python") — close but not quite right
+- The semantic retriever finds **"What is the pythonic way to reverse a defaultdict(list)?"** — semantically correct but keyword-mismatched
+- The hybrid pipeline combines both and surfaces the right answers at the top
+
+That difference is what this project demonstrates.
+
+---
 
 ## Architecture
 
 ```
-Query
-  │
-  ├─► BM25Retriever          (lexical, top-50)
-  │
-  ├─► SemanticRetriever      (IVF-FAISS, top-50)
-  │         └─ auto: Flat / IVFFlat / IVFPQ
-  │
-  ├─► HybridFusion (RRF)     (fuse → top-50)
-  │
-  └─► CrossEncoderReranker   (re-rank → top-5)
+User query
+    │
+    ├─► BM25Retriever        lexical match, ~10–20 ms
+    ├─► SemanticRetriever    FAISS dense vectors, ~15–30 ms
+    │         └─ auto: IndexFlatIP (<10K) / IVFFlat (<500K) / IVFPQ (500K+)
+    │
+    ├─► HybridFusion (RRF)   combines both rankings
+    └─► CrossEncoderReranker neural re-ranking, final top-5
 ```
 
-## Project Structure
-
-```
-hybrid_search_system/
-├── main.py                      # Full demo (dataset + IVF + metrics)
-├── evaluate.py                  # Standalone IR evaluation runner  ← NEW
-├── requirements.txt
-├── setup.py
-│
-├── configs/
-│   ├── model_config.yaml        # IVF nlist/nprobe settings added
-│   └── search_config.yaml       # Dataset + evaluation config added
-│
-├── src/
-│   ├── __init__.py              # Exports all public classes
-│   ├── dataset_loader.py        # NEW – StaQC HuggingFace loader + DataProcessor
-│   ├── bm25_retriever.py        # Updated – camelCase tokeniser
-│   ├── semantic_retriever.py    # Updated – adaptive FAISS (Flat/IVF/IVFPQ)
-│   ├── hybrid_fusion.py         # Updated – cleaner weighted fuse
-│   ├── cross_encoder_reranker.py# Unchanged interface
-│   ├── search_engine.py         # Updated – StaQC + IVF wired in
-│   ├── evaluation.py            # NEW – NDCG, MRR, Recall, MAP, EvaluationSuite
-│   ├── utils.py                 # Updated – backwards-compatible
-│   └── api.py                   # Updated – /admin/metrics endpoint added
-│
-└── tests/
-    └── test_hybrid_search.py    # Updated – covers all 3 new features
-```
-
-## Quick Start
-
-```bash
-# 1. Install
-python -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-
-# 2. Run full demo (downloads StaQC, builds IVF index, prints metrics)
-python main.py
-
-# 3. Run evaluation benchmark
-python evaluate.py --queries 10 --k 10
-
-# 4. Start API server
-uvicorn src.api:app --reload --port 8000
-```
-
-## Feature 1 – StaQC Dataset (2 K → 100 K)
-
-```python
-from src.search_engine import HybridSearchEngine
-
-engine = HybridSearchEngine(
-    data_path="staqc",      # triggers HuggingFace download
-    language="python",      # or "sql"
-    max_records=50_000,     # cap records; 0 = no cap
-    model_dir="models",
-)
-engine.build_indices()
-```
-
-The dataset is cached locally as Parquet after the first download — subsequent starts are instant.
-
-## Feature 2 – IR Evaluation Metrics
-
-### One-liner per query
-
-```python
-from src.evaluation import IRMetrics
-
-metrics = IRMetrics.evaluate_query(
-    retrieved=["doc_42", "doc_7", "doc_13"],
-    relevant={"doc_7", "doc_42"},
-    k=10,
-)
-# → {'ndcg@10': 0.93, 'mrr': 1.0, 'recall@10': 1.0, 'precision@10': 0.3, 'ap': 1.0}
-```
-
-### Full benchmark
-
-```python
-from src.evaluation import EvaluationSuite, GroundTruthBuilder
-
-# Build pseudo-relevance labels (or supply your own)
-gtb = GroundTruthBuilder(engine.metadata)
-ground_truth = gtb.build_from_keywords(queries, min_relevance=2)
-
-suite = EvaluationSuite(engine, k=10)
-report = suite.run(queries, ground_truth, search_types=["bm25","semantic","hybrid"])
-suite.print_report(report)
-suite.save_report(report, "outputs/eval.json")
-```
-
-**When to run:** offline, after changing models or corpus — never per API request.
-
-## Feature 3 – Adaptive FAISS Index
-
-| Corpus size  | Index type     | Notes                                |
-| ------------ | -------------- | ------------------------------------ |
-| < 10 K       | `IndexFlatIP`  | Exact, fastest for small sets        |
-| 10 K – 500 K | `IndexIVFFlat` | Approximate, auto-tuned nlist/nprobe |
-| ≥ 500 K      | `IndexIVFPQ`   | Compressed, memory-efficient         |
-
-Override manually:
-
-```python
-engine = HybridSearchEngine(
-    index_type="ivf",   # force IVFFlat regardless of corpus size
-    nlist=256,          # override auto nlist
-    nprobe=16,          # override auto nprobe
-    ...
-)
-```
-
-Tune nprobe at runtime (trade accuracy for speed):
-
-```python
-engine.semantic_retriever.set_nprobe(32)
-```
-
-## API Endpoints
-
-| Method | Path                      | Description                                          |
-| ------ | ------------------------- | ---------------------------------------------------- |
-| POST   | `/api/v1/search/lexical`  | BM25 search                                          |
-| POST   | `/api/v1/search/semantic` | IVF-FAISS semantic search                            |
-| POST   | `/api/v1/search/hybrid`   | Full hybrid pipeline                                 |
-| POST   | `/api/v1/compare`         | All three side-by-side                               |
-| GET    | `/api/v1/statistics`      | Corpus + index stats                                 |
-| GET    | `/api/v1/admin/metrics`   | Pre-computed NDCG/MRR/Recall (run evaluate.py first) |
-
-## Evaluation Metrics — Interpretation
-
-| Metric    | Formula                  | Good   | Excellent |
-| --------- | ------------------------ | ------ | --------- |
-| NDCG@10   | DCG / IDCG               | > 0.70 | > 0.85    |
-| MRR       | 1 / rank(first relevant) | > 0.70 | > 0.85    |
-| Recall@10 | hits / total relevant    | > 0.50 | > 0.75    |
-| MAP       | mean AP over queries     | > 0.50 | > 0.70    |
-
-## Running Tests
-
-```bash
-pytest tests/ -v --tb=short
-pytest tests/ -v -k "TestSemanticRetrieverIVF"   # IVF tests only
-pytest tests/ -v -k "TestNDCG or TestMRR"         # metric tests only
-```
-
-## Performance
-
-| Component                     | Latency         |
-| ----------------------------- | --------------- |
-| BM25 search                   | ~10–20 ms       |
-| Semantic (IVFFlat, 50 K docs) | ~15–30 ms       |
-| RRF fusion                    | ~1–2 ms         |
-| Cross-encoder (50 docs)       | ~100–200 ms     |
-| **Total hybrid**              | **~130–250 ms** |
+The index builds once and loads from disk on every subsequent run — typically under 10 seconds.
 
 ---
 
-Built with ❤️ — BM25 + IVF-FAISS + Cross-Encoder + NDCG/MRR/Recall
+## Results (tested locally on 3,700 docs)
+
+These numbers came from a run on 3,700 records of `mca_python` StaQC data on a CPU-only machine. The dataset was rate-limited mid-download at 3,700/4,000 rows, which is why it's not a round number.
+
+| Method     | NDCG@10  | MRR      | Precision@10 | Avg latency |
+| ---------- | -------- | -------- | ------------ | ----------- |
+| BM25       | 1.00     | 1.00     | 1.00         | 57 ms       |
+| Semantic   | 0.96     | 1.00     | 0.95         | 22 ms       |
+| **Hybrid** | **0.99** | **1.00** | **0.99**     | 6,114 ms    |
+
+A few honest notes about these numbers:
+
+**The metrics look suspiciously good.** NDCG and MRR near 1.0 is because ground-truth was built using keyword matching (`min_relevance=2`) — roughly 2,600+ documents matched each query as "relevant", so it's almost impossible to retrieve a non-relevant result. These numbers reflect internal consistency, not real-world relevance quality. For production use you'd want human-labelled relevance judgements.
+
+**Recall@10 is intentionally low (~0.014).** With 2,600 relevant documents per query and only 10 retrieved, you're covering about 1.4% of what exists. That's correct math, not a bug.
+
+**Hybrid latency is high at 6 seconds.** This is the cross-encoder running on CPU re-ranking 50 candidate pairs. On a machine with a GPU that drops to ~200–400 ms. For local/demo use it's fine; for production you'd run inference on GPU or reduce the candidate pool.
+
+---
+
+## Dataset
+
+Uses `koutch/staqc` from HuggingFace, loaded via the [Datasets Server REST API](https://huggingface.co/docs/datasets-server) — no `datasets` library required. The dataset contains Stack Overflow questions with accepted code answers.
+
+| Config       | Content                      | Size      |
+| ------------ | ---------------------------- | --------- |
+| `mca_python` | Multi-code-answer Python Q&A | ~40K rows |
+| `man_python` | Manually curated Python Q&A  | ~2K rows  |
+| `man_sql`    | Manually curated SQL Q&A     | ~2K rows  |
+
+For local development, the project defaults to 4,000 rows of `mca_python`. For production, raise `MAX_RECORDS` and let it run — the full 40K takes about 15 minutes to encode on CPU.
+
+Data is cached locally as CSV after the first download so subsequent runs don't re-fetch anything.
+
+---
+
+## Getting started
+
+```bash
+# clone and install
+cd hybrid_search_system
+python -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+
+# build indices (downloads ~4K rows, encodes with sentence-transformers)
+python main.py
+```
+
+First run takes 5–10 minutes depending on your connection and CPU. You'll see each step print as it completes:
+
+```
+✓ Step 1/4 complete — 3,700 documents loaded
+✓ Step 2/4  BM25 index built
+✓ Step 3/4  FAISS index built
+✓ Step 4/4  Indices saved → models
+✅ All indices built and saved successfully!
+```
+
+Second run loads everything from disk and reaches the search results in about 10 seconds.
+
+---
+
+## Run the evaluation
+
+```bash
+python evaluate.py
+```
+
+This builds pseudo-relevance ground truth, runs all three search types across 15 queries, and prints NDCG/MRR/Recall side by side. The full report saves to `outputs/evaluation_report.json`.
+
+To test with fewer queries or a single search type:
+
+```bash
+python evaluate.py --queries 5
+python evaluate.py --search-type hybrid
+python evaluate.py --min-relevance 4   # stricter ground truth
+```
+
+---
+
+## Start the API
+
+```bash
+uvicorn src.api:app --reload --port 8000
+```
+
+Swagger docs at `http://localhost:8000/docs`. Key endpoints:
+
+|      | Path                      | What it does                                    |
+| ---- | ------------------------- | ----------------------------------------------- |
+| POST | `/api/v1/search/hybrid`   | Full pipeline search                            |
+| POST | `/api/v1/search/lexical`  | BM25 only                                       |
+| POST | `/api/v1/search/semantic` | FAISS only                                      |
+| POST | `/api/v1/compare`         | All three side by side                          |
+| GET  | `/api/v1/statistics`      | Corpus + index info                             |
+| GET  | `/api/v1/admin/metrics`   | Pre-computed NDCG/MRR (run `evaluate.py` first) |
+
+---
+
+## Project structure
+
+```
+hybrid_search_system/
+├── main.py                    entry point — builds indices, runs demo
+├── evaluate.py                offline IR evaluation (NDCG / MRR / Recall)
+├── requirements.txt
+│
+├── src/
+│   ├── dataset_loader.py      StaQC download (REST API) + DataProcessor
+│   ├── bm25_retriever.py      BM25Okapi with camelCase tokeniser
+│   ├── semantic_retriever.py  sentence-transformers + adaptive FAISS
+│   ├── hybrid_fusion.py       Reciprocal Rank Fusion
+│   ├── cross_encoder_reranker.py  ms-marco-MiniLM-L-6-v2 re-ranking
+│   ├── search_engine.py       orchestrator (build / search / compare)
+│   ├── evaluation.py          NDCG, MRR, Recall, MAP, EvaluationSuite
+│   └── api.py                 FastAPI endpoints
+│
+├── models/                    saved indices (git-ignored)
+│   ├── bm25_index.pkl
+│   ├── faiss_index.bin
+│   ├── embeddings.npy
+│   └── data_cache/staqc_*.csv
+│
+└── outputs/
+    ├── evaluation_report.json
+    └── batch_results.json
+```
+
+---
+
+## Scaling up
+
+The system was tested at 3,700 documents. To run at larger scales:
+
+```python
+# in main.py
+MAX_RECORDS = 20_000   # ~15 min build on CPU
+MAX_RECORDS = 0        # full 40K mca_python corpus
+```
+
+FAISS index type switches automatically:
+
+- Under 10K → exact flat index (fast, precise)
+- 10K–500K → IVFFlat (approximate, much faster at query time)
+- Over 500K → IVFPQ (compressed, for very large sets)
+
+To rebuild after changing the corpus:
+
+```bash
+python main.py --force-rebuild
+# or delete models/ and re-run
+```
+
+---
+
+## Known limitations
+
+- **HuggingFace rate limiting** — the Datasets Server API allows ~3,700–4,000 rows per session unauthenticated. Set `HF_TOKEN` in your environment to get higher limits. The local CSV cache means this only affects the first download.
+- **CPU cross-encoder latency** — 6 seconds per query on CPU is too slow for production. A GPU or a smaller candidate pool (`retrieve_k=20` instead of 50) brings it down significantly.
+- **Pseudo-relevance ground truth** — the evaluation numbers are only as good as the keyword-matching ground truth. Real relevance labels would give more meaningful NDCG/Recall scores.
+
+---
+
+## Tech stack
+
+| Component        | Library                                                     |
+| ---------------- | ----------------------------------------------------------- |
+| Keyword search   | rank-bm25                                                   |
+| Dense embeddings | sentence-transformers (all-MiniLM-L6-v2)                    |
+| Vector index     | FAISS (faiss-cpu)                                           |
+| Re-ranking       | sentence-transformers CrossEncoder (ms-marco-MiniLM-L-6-v2) |
+| API              | FastAPI + uvicorn                                           |
+| Dataset          | HuggingFace Datasets Server API                             |
